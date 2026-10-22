@@ -132,7 +132,7 @@ class SheetsService:
                 {
                     "tenant_id": "TENANT_A",
                     "tenant_name": "優質車行股份有限公司",
-                    "authorized_line_user_ids": "U_DEMO_TENANT_A",
+                    "authorized_line_user_ids": "U42607efe1d183ad9503f72a1f0b0553d",
                     "notify_enabled": True
                 },
                 {
