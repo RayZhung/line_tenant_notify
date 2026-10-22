@@ -56,9 +56,7 @@ def read_root(request: Request):
         "app": APP_NAME,
         "version": VERSION,
         "url_path": str(request.url.path),
-        "scope_path": request.scope.get("path"),
-        "x_matched_path": request.headers.get("x-matched-path"),
-        "x_forwarded_uri": request.headers.get("x-forwarded-uri")
+        "headers": dict(request.headers)
     }
 
 @app.get("/health")
