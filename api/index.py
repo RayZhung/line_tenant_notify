@@ -47,6 +47,9 @@ sheets_service = SheetsService()
 line_service = LineService()
 
 @app.get("/")
+@app.get("/api")
+@app.get("/api/")
+@app.get("/api/index.py")
 def read_root():
     return {
         "status": "online",
@@ -56,10 +59,13 @@ def read_root():
     }
 
 @app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {"status": "healthy", "version": VERSION}
 
 @app.post("/api/v1/trigger")
+@app.post("/v1/trigger")
+@app.post("/trigger")
 async def trigger_anomaly_notification(
     request: Request,
     x_trigger_token: Optional[str] = Header(None, alias="X-Trigger-Token")
@@ -133,6 +139,7 @@ async def trigger_anomaly_notification(
     }
 
 @app.post("/callback")
+@app.post("/api/callback")
 async def line_webhook(request: Request):
     """
     LINE 官方 Webhook 回呼端點
@@ -154,3 +161,17 @@ async def line_webhook(request: Request):
     except Exception as e:
         logger.error(f"Error handling webhook signature: {e}")
         return JSONResponse(status_code=400, content={"error": "Invalid signature"})
+
+@app.get("/{fallback_path:path}")
+def fallback_catch_all(request: Request, fallback_path: str):
+    """
+    備援路由：確保任何自訂路徑皆能回傳服務狀態資訊
+    """
+    return {
+        "status": "online",
+        "app": APP_NAME,
+        "version": VERSION,
+        "matched_path": fallback_path,
+        "request_url": str(request.url)
+    }
+
