@@ -1,6 +1,6 @@
 # 多租戶 LINE Bot 異常通知系統 (Multi-Tenant LINE Bot Notification System)
 
-[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)](version.py)
+[![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)](version.py)
 [![ISO27001](https://img.shields.io/badge/Security-ISO27001%20Compliant-green.svg)](.env.example)
 [![Platform](https://img.shields.io/badge/Deployment-Vercel%20%7C%20Ubuntu-black.svg)](vercel.json)
 

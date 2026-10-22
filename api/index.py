@@ -50,12 +50,15 @@ line_service = LineService()
 @app.get("/api")
 @app.get("/api/")
 @app.get("/api/index.py")
-def read_root():
+def read_root(request: Request):
     return {
         "status": "online",
         "app": APP_NAME,
         "version": VERSION,
-        "architecture": "Vercel Serverless (FastAPI) + Ubuntu Crawler"
+        "url_path": str(request.url.path),
+        "scope_path": request.scope.get("path"),
+        "x_matched_path": request.headers.get("x-matched-path"),
+        "x_forwarded_uri": request.headers.get("x-forwarded-uri")
     }
 
 @app.get("/health")
