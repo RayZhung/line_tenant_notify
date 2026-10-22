@@ -42,6 +42,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def vercel_path_rewrite_middleware(request: Request, call_next):
+    raw_path = request.query_params.get("__raw_path")
+    if raw_path:
+        # 確保 path 格式正確 (如 /api/v1/trigger 或 /)
+        normalized_path = raw_path if raw_path.startswith("/") else f"/{raw_path}"
+        request.scope["path"] = normalized_path
+    response = await call_next(request)
+    return response
+
 # 依賴服務實例
 sheets_service = SheetsService()
 line_service = LineService()
