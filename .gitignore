@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & Secrets (ISO27001 規範：嚴禁上傳真實金鑰與敏感設定)
+.env
+.env.local
+.env.*.local
+service_account.json
+credentials.json
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+crawler_cron.log
+
+# Virtual Environments
+venv/
+.venv/
+ENV/
+env/
+
+# IDE / OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel
