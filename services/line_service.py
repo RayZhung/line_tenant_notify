@@ -53,6 +53,7 @@ class LineService:
                 self.api_client = ApiClient(config)
                 self.messaging_api = MessagingApi(self.api_client)
                 self.handler = WebhookHandler(self.channel_secret)
+                self._register_handlers()
                 logger.info("Initialized LINE SDK v3 successfully.")
             except Exception as e:
                 logger.error(f"Error initializing LINE SDK v3: {e}")
@@ -63,6 +64,35 @@ class LineService:
                 logger.info("Initialized LINE SDK v2 successfully.")
             except Exception as e:
                 logger.error(f"Error initializing LINE SDK v2: {e}")
+
+    def _register_handlers(self):
+        if not self.handler or not self.messaging_api:
+            return
+
+        try:
+            from linebot.v3.webhooks import MessageEvent, TextMessageContent
+            from linebot.v3.messaging import ReplyMessageRequest, TextMessage
+
+            @self.handler.add(MessageEvent, message=TextMessageContent)
+            def handle_text_message(event):
+                user_id = getattr(event.source, "user_id", "UNKNOWN")
+                reply_text = (
+                    f"👋 您好！我是「場域訊息通報」機器人。\n\n"
+                    f"您的 LINE User ID 為：\n👉 {user_id}\n\n"
+                    f"💡 請將此 User ID 提供給系統管理者，填入「多租戶權限表」，"
+                    f"即可接收您所屬場站的即時營運與異常推播！"
+                )
+                try:
+                    self.messaging_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text=reply_text)]
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to reply message: {e}")
+        except Exception as e:
+            logger.warning(f"Could not register message handlers: {e}")
 
     @staticmethod
     def build_anomaly_flex_bubble(tenant_name: str, anomalies: List[Dict[str, Any]]) -> Dict[str, Any]:
