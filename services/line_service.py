@@ -226,7 +226,7 @@ class LineService:
 
         try:
             if LINE_SDK_AVAILABLE is True and self.messaging_api:
-                container = FlexContainer.from_dict(flex_dict)
+                container = FlexContainer.from_json(json.dumps(flex_dict))
                 flex_msg = FlexMessage(alt_text=alt_text, contents=container)
                 request = PushMessageRequest(
                     to=user_id,
