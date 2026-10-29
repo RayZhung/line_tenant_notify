@@ -174,14 +174,14 @@ class LineService:
                         "contents": [
                             {
                                 "type": "text",
-                                "text": "💡 提示範例：",
+                                "text": "💡 授權碼說明：",
                                 "size": "xs",
                                 "weight": "bold",
                                 "color": "#475569"
                             },
                             {
                                 "type": "text",
-                                "text": "請直接輸入公司配發的專屬授權碼，例如：micro89798198 或 DG515555",
+                                "text": "請向貴公司系統管理員索取專屬授權代碼，直接於此對話框中輸入（虛擬格式範例：sample_auth_888，英文大小寫需相符）。",
                                 "size": "xxs",
                                 "color": "#64748B",
                                 "wrap": True,

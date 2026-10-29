@@ -8,6 +8,7 @@ __pycache__/
 .env.local
 .env.*.local
 service_account.json
+base64_for_vercel.txt
 credentials.json
 *.pem
 *.key

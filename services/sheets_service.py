@@ -370,14 +370,11 @@ class SheetsService:
     def fetch_enterprise_auth_map(self) -> Dict[str, Dict[str, Any]]:
         """
         讀取車車戰情室主檔「企業名單」，取得企業授權碼對照表
-        回傳: { 'micro89798198': {'company_id': '1', 'company_name': '微程式'}, ... }
+        從雲端主檔即時動態比對，落實 ISO27001 不寫死任何真實授權碼
         """
         if not self.client or not self.master_spreadsheet_id:
-            return {
-                "micro89798198": {"company_id": "1", "company_name": "微程式"},
-                "DG515555": {"company_id": "2", "company_name": "大冠"},
-                "Baili8816888": {"company_id": "3", "company_name": "百里亭"}
-            }
+            logger.warning("Master sheets client not configured, cannot fetch enterprise auth map.")
+            return {}
         try:
             m_sh = self.client.open_by_key(self.master_spreadsheet_id)
             ws = m_sh.worksheet("企業名單")
@@ -396,11 +393,7 @@ class SheetsService:
             return auth_map
         except Exception as e:
             logger.error(f"Error reading enterprise auth map: {e}")
-            return {
-                "micro89798198": {"company_id": "1", "company_name": "微程式"},
-                "DG515555": {"company_id": "2", "company_name": "大冠"},
-                "Baili8816888": {"company_id": "3", "company_name": "百里亭"}
-            }
+            return {}
 
     def bind_user_to_company(self, line_user_id: str, auth_code: str) -> Optional[Dict[str, Any]]:
         """
