@@ -11,10 +11,11 @@
 import os
 import sys
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, Request, Header, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -330,17 +331,27 @@ if line_service.handler:
     except Exception as e:
         logger.error(f"Failed to bind custom LINE message handler: {e}")
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
+@app.get("/guide", response_class=HTMLResponse)
+def serve_user_guide():
+    guide_path = Path(__file__).resolve().parent.parent / "docs" / "index.html"
+    if guide_path.exists():
+        return HTMLResponse(content=guide_path.read_text(encoding="utf-8"), status_code=200)
+    return HTMLResponse(
+        content=f"<h1>{APP_NAME} v{VERSION}</h1><p>Online status: healthy</p>",
+        status_code=200,
+    )
+
 @app.get("/api")
 @app.get("/api/")
+@app.get("/api/status")
 @app.get("/api/index.py")
-def read_root(request: Request):
+def read_api_status(request: Request):
     return {
         "status": "online",
         "app": APP_NAME,
         "version": VERSION,
         "url_path": str(request.url.path),
-        "headers": dict(request.headers)
     }
 
 @app.get("/health")

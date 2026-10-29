@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>場域訊息通報｜智慧停車場異常監控中心 使用手冊</title>
+  <meta name="description" content="多租戶智慧停車場異常監控 LINE 官方帳號操作手冊：企業授權綁定、自主挑選 10 座監控場站、自然語言口語門檻設定與群組智慧靜默模式說明。" />
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-alt: #f1f5f9;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --primary: #0284c7;
+      --primary-dark: #0369a1;
+      --line-green: #06c755;
+      --line-green-dark: #05a847;
+      --amber-bg: #fffbeb;
+      --amber-border: #f59e0b;
+      --amber-text: #92400e;
+      --emerald-bg: #ecfdf5;
+      --emerald-border: #10b981;
+      --radius: 16px;
+      --shadow: 0 10px 30px -10px rgba(15, 23, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #0c4a6e 100%);
+      color: #ffffff;
+      padding: 48px 20px 56px;
+    }
+
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #e0f2fe;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.45fr 1fr;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .hero h1 {
+      font-size: clamp(26px, 4vw, 36px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      line-height: 1.25;
+    }
+
+    .hero p.subtitle {
+      color: #cbd5e1;
+      font-size: 16px;
+      margin-bottom: 22px;
+    }
+
+    .cta-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .btn-line {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background-color: var(--line-green);
+      color: #ffffff;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 16px;
+      padding: 14px 24px;
+      border-radius: 12px;
+      box-shadow: 0 8px 20px rgba(6, 199, 85, 0.32);
+      transition: transform 0.15s ease, background-color 0.15s ease;
+    }
+
+    .btn-line:hover {
+      background-color: var(--line-green-dark);
+      transform: translateY(-1px);
+    }
+
+    .qr-card {
+      background: #ffffff;
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+      max-width: 260px;
+      margin: 0 auto;
+    }
+
+    .qr-card img {
+      width: 168px;
+      height: 168px;
+      object-fit: contain;
+      display: block;
+      margin: 0 auto 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .qr-card .qr-id {
+      font-weight: 800;
+      font-size: 15px;
+      color: #0f172a;
+    }
+
+    .qr-card .qr-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    main {
+      padding: 0 20px 64px;
+      margin-top: -24px;
+    }
+
+    .preface-banner {
+      background: var(--amber-bg);
+      border: 2px solid var(--amber-border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 28px;
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .preface-icon {
+      font-size: 26px;
+      line-height: 1.1;
+      flex-shrink: 0;
+    }
+
+    .preface-title {
+      font-weight: 800;
+      font-size: 17px;
+      color: #78350f;
+      margin-bottom: 4px;
+    }
+
+    .preface-text {
+      color: var(--amber-text);
+      font-size: 15px;
+      font-weight: 500;
+    }
+
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .section-header {
+      margin-bottom: 20px;
+    }
+
+    .section-header h2 {
+      font-size: 21px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .section-header p {
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .steps-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .step-card {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+
+    .step-num {
+      display: inline-block;
+      background: var(--primary);
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 3px 10px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+    }
+
+    .step-card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .step-card p {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .nlu-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+    }
+
+    .nlu-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      background: #ffffff;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 10px;
+      transition: border-color 0.15s ease;
+    }
+
+    .nlu-card:hover {
+      border-color: var(--primary);
+    }
+
+    .nlu-tag {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--primary-dark);
+      background: #e0f2fe;
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+    }
+
+    .nlu-phrase {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      background: var(--surface-alt);
+      padding: 10px 12px;
+      border-radius: 8px;
+      border-left: 4px solid var(--primary);
+      word-break: break-all;
+    }
+
+    .nlu-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .nlu-desc {
+      font-size: 12.5px;
+      color: var(--text-muted);
+    }
+
+    .copy-btn {
+      flex-shrink: 0;
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 11px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .copy-btn:hover {
+      background: var(--primary);
+      color: #ffffff;
+      border-color: var(--primary);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--surface-alt);
+      font-weight: 700;
+      color: #334155;
+      white-space: nowrap;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: #f1f5f9;
+      color: #0369a1;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .group-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+
+    .info-box {
+      border-radius: 12px;
+      padding: 18px;
+      border: 1px solid var(--border);
+      background: var(--surface-alt);
+    }
+
+    .info-box.highlight {
+      background: var(--emerald-bg);
+      border-color: var(--emerald-border);
+    }
+
+    .info-box h3 {
+      font-size: 15.5px;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .info-box ul {
+      padding-left: 18px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .info-box li + li {
+      margin-top: 6px;
+    }
+
+    footer {
+      text-align: center;
+      color: #64748b;
+      font-size: 13px;
+      padding: 16px 20px 40px;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: #0f172a;
+      color: #ffffff;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.2s ease;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+      z-index: 999;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    @media (max-width: 768px) {
+      .hero-grid,
+      .steps-grid,
+      .nlu-grid,
+      .group-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .section {
+        padding: 20px;
+      }
+
+      .btn-line {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="hero">
+    <div class="container">
+      <div class="badge-row">
+        <span class="badge">🅿️ 智慧場站異常監控中心</span>
+        <span class="badge">🔒 多租戶企業授權隔離</span>
+        <span class="badge">💬 支援白話自然語言設定</span>
+        <span class="badge">v1.6.0</span>
+      </div>
+
+      <div class="hero-grid">
+        <div>
+          <h1>場域訊息通報 LINE 機器人<br />操作教學手冊</h1>
+          <p class="subtitle">
+            全天候自動巡檢停車場「剩餘車位上下限」與「設備斷線狀態」。支援每位管理員或維運群組自主挑選最多 10 座監控場站，無異常不打擾、有異常精準通報。
+          </p>
+          <div class="cta-group">
+            <a class="btn-line" href="https://line.me/R/ti/p/@586cwcxm" target="_blank" rel="noopener noreferrer">
+              ➕ 加入 LINE 場站監控中心（@586cwcxm）
+            </a>
+          </div>
+        </div>
+
+        <div>
+          <div class="qr-card">
+            <img src="https://qr-official.line.me/gs/M_586cwcxm_GW.png" alt="LINE 官方帳號 @586cwcxm QR Code" />
+            <div class="qr-id">LINE ID：@586cwcxm</div>
+            <div class="qr-hint">手機相機或 LINE 掃描立即加入</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+
+      <!-- 使用前必讀前言 -->
+      <div class="preface-banner" role="alert">
+        <div class="preface-icon">⚠️</div>
+        <div>
+          <div class="preface-title">前言｜使用前必讀準備事項</div>
+          <div class="preface-text">
+            使用前請務必先提供<strong>欲監控的場站相關資訊</strong>，待系統管理者完成後台建檔與設定之後，將會產生專屬的<strong>【企業授權碼】</strong>供您輸入綁定。
+          </div>
+        </div>
+      </div>
+
+      <!-- 三步驟快速上手 -->
+      <section class="section">
+        <div class="section-header">
+          <h2>🚀 三步驟快速上手</h2>
+          <p>加入 LINE 好友或邀請機器人進入維運群組後，只需 30 秒即可完成個人化監控配置。</p>
+        </div>
+
+        <div class="steps-grid">
+          <div class="step-card">
+            <span class="step-num">STEP 1</span>
+            <h3>輸入企業授權碼綁定</h3>
+            <p>
+              取得管理者配發的<strong>企業授權碼</strong>後，直接貼到 LINE 對話框送出（注意英文大小寫），即可解鎖貴公司授權場站權限。
+            </p>
+          </div>
+
+          <div class="step-card">
+            <span class="step-num">STEP 2</span>
+            <h3>挑選監控場站（上限 10 場）</h3>
+            <p>
+              輸入 <code>/可選場站</code> 展開貴公司完整場站清單，直接點擊場站右側的<strong>「➕ 可新增」</strong>按鈕，或直接用口語一次加入多座場站。
+            </p>
+          </div>
+
+          <div class="step-card">
+            <span class="step-num">STEP 3</span>
+            <h3>自訂車位門檻與冷卻時數</h3>
+            <p>
+              加入後預設<strong>車位 &lt; 5 格（冷卻 6 小時）</strong>、<strong>斷線（冷卻 24 小時）</strong>自動告警；隨時可用下方口語調整上下限與冷卻間隔。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 自然語言口語互動範例 -->
+      <section class="section">
+        <div class="section-header">
+          <h2>💬 自然語言口語範例（免背指令，點擊即可複製）</h2>
+          <p>內建極速中文語意引擎（自動容錯「廠／場」、「下線／下限」等常見輸入法同音字），直接像跟真人助理說話一樣打字即可：</p>
+        </div>
+
+        <div class="nlu-grid">
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">➕ 多場站一次加入</span>
+              <div class="nlu-phrase">幫我把前金成功場跟青埔二場列入監控</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">支援一次講多座場站名稱或代號</span>
+              <button class="copy-btn" data-copy="幫我把前金成功場跟青埔二場列入監控">📋 點擊複製</button>
+            </div>
+          </div>
+
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">⚡ 加入同時設門檻</span>
+              <div class="nlu-phrase">幫我把台中東山列入監控，車位少於 8 格通知我</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">自動完成訂閱並套用自訂下限</span>
+              <button class="copy-btn" data-copy="幫我把台中東山列入監控，車位少於 8 格通知我">📋 點擊複製</button>
+            </div>
+          </div>
+
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">🅿️ 同時設定車位上下限</span>
+              <div class="nlu-phrase">設定樹林俊興場的車位門檻下限為5上限為15</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">低於 5 格或高於 15 格皆會推播提醒</span>
+              <button class="copy-btn" data-copy="設定樹林俊興場的車位門檻下限為5上限為15">📋 點擊複製</button>
+            </div>
+          </div>
+
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">🎯 單獨微調上限或下限</span>
+              <div class="nlu-phrase">把樹林俊興場的車位上限改為 20</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">單改一邊時，原本設定的下限會安全保留</span>
+              <button class="copy-btn" data-copy="把樹林俊興場的車位上限改為 20">📋 點擊複製</button>
+            </div>
+          </div>
+
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">⏱️ 調整防洗版冷卻間隔</span>
+              <div class="nlu-phrase">樹林俊興場車位通知冷卻改成 12 小時</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">支援 6 / 12 / 18 / 24 / 36 小時（或說「半天」、「一天」）</span>
+              <button class="copy-btn" data-copy="樹林俊興場車位通知冷卻改成 12 小時">📋 點擊複製</button>
+            </div>
+          </div>
+
+          <div class="nlu-card">
+            <div>
+              <span class="nlu-tag">🗑️ 防呆清空全部監控</span>
+              <div class="nlu-phrase">解除全部的場站監控</div>
+            </div>
+            <div class="nlu-footer">
+              <span class="nlu-desc">會先彈出二次確認按鈕保護，保留企業綁定身分</span>
+              <button class="copy-btn" data-copy="解除全部的場站監控">📋 點擊複製</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 標準斜線指令表 -->
+      <section class="section">
+        <div class="section-header">
+          <h2>⌨️ 標準斜線指令速查表</h2>
+          <p>除了白話口語外，您隨時可以使用精確的斜線指令或點擊卡片上的快捷按鈕操作：</p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>指令格式</th>
+                <th>功能說明</th>
+                <th>操作範例</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>/可選場站</code></td>
+                <td>展開貴公司所有可監控場站清單（可直接點擊右側按鈕新增／移除）</td>
+                <td><code>/可選場站</code></td>
+              </tr>
+              <tr>
+                <td><code>/查詢</code></td>
+                <td>查看目前已監控場站（上限 10 座）、車位上下限與冷卻設定</td>
+                <td><code>/查詢</code></td>
+              </tr>
+              <tr>
+                <td><code>/新增 [代號或名稱]</code></td>
+                <td>將單座或多座場站加入監控清單</td>
+                <td><code>/新增 03 05</code></td>
+              </tr>
+              <tr>
+                <td><code>/移除 [代號或全部]</code></td>
+                <td>移除指定場站以釋出配額，或輸入 <code>/移除 全部</code> 開啟清空確認卡</td>
+                <td><code>/移除 03</code></td>
+              </tr>
+              <tr>
+                <td><code>/車位 [代號] [下限] [上限]</code></td>
+                <td>設定剩餘車位警戒上下限（不設限請填 <code>無</code>，關閉填 <code>關閉</code>）</td>
+                <td><code>/車位 05 5 15</code></td>
+              </tr>
+              <tr>
+                <td><code>/冷卻 [代號或全部] [車位|斷線] [時數]</code></td>
+                <td>設定同一異常重複通知的冷卻間隔（限 <code>6</code> / <code>12</code> / <code>18</code> / <code>24</code> / <code>36</code> 小時）</td>
+                <td><code>/冷卻 全部 車位 12</code></td>
+              </tr>
+              <tr>
+                <td><code>/重新綁定</code></td>
+                <td>解除目前企業授權碼綁定並清空選站，以便切換綁定其他企業授權碼</td>
+                <td><code>/重新綁定</code></td>
+              </tr>
+              <tr>
+                <td><code>/?</code></td>
+                <td>在 LINE 對話中隨時呼叫互動式指令說明手冊卡片</td>
+                <td><code>/?</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- LINE 群組使用說明 -->
+      <section class="section">
+        <div class="section-header">
+          <h2>👥 LINE 群組「智慧靜默模式」使用指南</h2>
+          <p>支援將機器人邀請至企業維運 LINE 群組共同接收異常通報與管理場站：</p>
+        </div>
+
+        <div class="group-grid">
+          <div class="info-box highlight">
+            <h3>🤫 日常聊天 100% 靜默不插嘴</h3>
+            <ul>
+              <li>在群組中，同事間日常交談、傳送問號或討論一般公務時，機器人會<strong>自動保持 100% 安靜</strong>，絕不跳出預設問候語洗版。</li>
+              <li>唯有偵測到<strong>「新增／刪除監控場站、修改車位門檻或冷卻時間、查詢清單、輸入企業授權碼」</strong>等明確管理意圖時，機器人才會現身回覆！</li>
+              <li>不同 LINE 群組皆以獨立群組 ID 綁定，就算同一人將機器人拉進 A、B 兩個群組並啟用不同企業授權碼，資料也完全隔離不衝突。</li>
+            </ul>
+          </div>
+
+          <div class="info-box">
+            <h3>📊 群組訊息額度小提醒</h3>
+            <ul>
+              <li><strong>互動指令回覆（免費）：</strong>在群組裡查詢場站、新增移除或修改門檻時，機器人的回覆訊息<strong>消耗 0 則額度（完全免費）</strong>。</li>
+              <li><strong>定時主動警報（依人數計費）：</strong>當場站發生車位不足或斷線，機器人主動推播警報至群組時，LINE 官方會依<strong>「群組內成員人數 × 發送次數」</strong>計算月度推播額度。</li>
+              <li><strong>最佳實務建議：</strong>建議將機器人邀請至<strong>精簡的核心維運小群組（如 3～5 人）</strong>，或由管理員以 1 對 1 個人對話綁定，最能發揮免費額度效益！</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer>
+    場域訊息通報｜智慧停車場異常監控系統 v1.6.0 · 遵循 ISO27001 企業多租戶資安隔離規範
+  </footer>
+
+  <div id="toast" class="toast">✅ 已複製指令，可直接貼至 LINE 對話框！</div>
+
+  <script>
+    (function () {
+      var toast = document.getElementById("toast");
+      var timer = null;
+
+      function showToast(text) {
+        toast.textContent = "✅ 已複製：「" + text + "」";
+        toast.classList.add("show");
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(function () {
+          toast.classList.remove("show");
+        }, 2200);
+      }
+
+      document.querySelectorAll(".copy-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var phrase = btn.getAttribute("data-copy") || "";
+          if (!phrase) return;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(phrase).then(function () {
+              showToast(phrase);
+            });
+          } else {
+            var ta = document.createElement("textarea");
+            ta.value = phrase;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+            showToast(phrase);
+          }
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
+
