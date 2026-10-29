@@ -1185,7 +1185,7 @@ class LineService:
                             "text": f"斷線冷卻: {off_cool} 小時",
                             "size": "xxs",
                             "color": "#64748B",
-                            "margin": "xxs"
+                            "margin": "xs"
                         }
                     ]
                 })

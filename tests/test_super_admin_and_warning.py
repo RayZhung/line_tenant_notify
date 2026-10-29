@@ -228,7 +228,11 @@ def test_full_candidate_list_and_interactive_actions():
     ][0]
     rm_pill = first_query_card["contents"][0]["contents"][1]
     assert rm_pill["action"]["text"] == "/移除 01"
-    print("  [PASS] /查詢 個人監控清單支援多張垂直捲動與點擊『➖ 可移除』驗證通過")
+    # 防呆驗證：確保所有 Flex 結構中未誤用 LINE 不支援的 margin/spacing: 'xxs'
+    query_json_str = json.dumps(query_bubbles, ensure_ascii=False)
+    assert '"margin": "xxs"' not in query_json_str
+    assert '"spacing": "xxs"' not in query_json_str
+    print("  [PASS] /查詢 個人監控清單支援多張垂直捲動與點擊『➖ 可移除』驗證通過 (Flex 屬性合規)")
 
 def test_monthly_warning_counter_logic():
     print("\n=== 測試 3: 驗證推播累加與 195 門檻判定邏輯 ===")
