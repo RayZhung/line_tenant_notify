@@ -75,15 +75,30 @@ def get_gspread_client():
 def apply_jitter(min_s: float = 0.5, max_s: float = 1.5):
     time.sleep(random.uniform(min_s, max_s))
 
-def check_site_status(site: Dict[str, Any]) -> List[Dict[str, Any]]:
+def format_company_info(raw_auth: Any, enterprises: Dict[str, str], raw_name: Optional[str] = None) -> tuple:
+    """
+    選項 A 規範：將 '12' 格式化為 company_id: '1, 2'，company_name: '微程式 / 大冠'
+    """
+    auth_str = str(raw_auth or "1").strip()
+    digits = sorted(list(set(c for c in auth_str if c.isdigit())))
+    if not digits:
+        digits = ["1"]
+    formatted_id = ", ".join(digits)
+    names = [enterprises[d] for d in digits if d in enterprises]
+    if not names and raw_name:
+        names = [raw_name]
+    formatted_name = " / ".join(names) if names else "微程式"
+    return formatted_id, formatted_name
+
+def check_site_status(site: Dict[str, Any], enterprises: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """
     依據 PARKV4_BACKEND_SPECS 巡檢單一場站狀態
     """
+    ent_map = enterprises or {"1": "微程式", "2": "大冠", "3": "百里亭"}
     results = []
     station_name = site.get("停車場名稱") or site.get("站名") or "未知場站"
     raw_ip = str(site.get("IP位址") or site.get("IP") or "").strip()
-    company_name = site.get("公司名稱") or ""
-    company_id = str(site.get("授權企業") or "1").strip()
+    company_id, company_name = format_company_info(site.get("授權企業"), ent_map, site.get("公司名稱"))
     account = str(site.get("帳號") or "appuser").strip()
     password = str(site.get("密碼") or "").strip()
     generation = str(site.get("世代") or "四代").strip()
@@ -213,11 +228,7 @@ def run_crawler_pipeline():
     sample_sites = sites[:5] if len(sites) > 5 else sites
 
     for s in sample_sites:
-        # 補充企業名稱
-        cid = str(s.get("授權企業", "1")).strip().split(",")[0]
-        if not s.get("公司名稱") and cid in enterprises:
-            s["公司名稱"] = enterprises[cid]
-        records = check_site_status(s)
+        records = check_site_status(s, enterprises)
         inspected_records.extend(records)
 
     # 確保有可用車位示範數據 (若全部實體連線皆離線或未啟用)

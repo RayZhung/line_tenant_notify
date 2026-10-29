@@ -2,9 +2,11 @@
 多租戶 LINE Bot 異常通知系統 - 主應用服務 (Vercel Serverless Function)
 支援:
   1. 模組二交接觸發端點 (/api/v1/trigger)
-  2. 多租戶 (Company) 與角色 (甲/乙) 雙重隔離推播
-  3. 自訂車位門檻、斷線警報與 6/12/18/24/36 小時冷卻防洗版
-  4. LINE 官方 Webhook 回呼與互動指令 (/? 指令手冊、/查詢 門檻設定、/車位 門檻調整、/冷卻 間隔設定)
+  2. 企業授權碼驗證綁定 (首次進線強制驗證)
+  3. 管理者自主挑選監控場站 (<= 10 場)
+  4. 多租戶 (Company) 與個人化隔離推播
+  5. 自訂車位門檻、斷線警報與 6/12/18/24/36 小時冷卻防洗版
+  6. LINE 官方 Webhook 回呼與互動指令 (/可選場站、/新增、/移除、/查詢、/車位、/冷卻、/?)
 """
 import os
 import sys
@@ -56,7 +58,7 @@ async def vercel_path_rewrite_middleware(request: Request, call_next):
 sheets_service = SheetsService()
 line_service = LineService()
 
-# 註冊 LINE 訊息處理器 (支援 /?、/查詢、/車位、/冷卻 等管理指令)
+# 註冊 LINE 訊息處理器
 if line_service.handler:
     try:
         from linebot.v3.webhooks import MessageEvent, TextMessageContent
@@ -71,15 +73,93 @@ if line_service.handler:
             cmd_res = TenantService.parse_and_execute_command(user_id, text, sheets_service)
             action = cmd_res.get("action")
 
-            if action == "help":
+            # 1. 尚未授權 -> 提示輸入企業授權碼
+            if action == "auth_required":
+                bubble = line_service.build_auth_request_flex_bubble(user_id)
+                line_service.reply_flex(reply_token, bubble, alt_text="🔒 請輸入企業授權碼")
+
+            # 2. 授權碼驗證成功
+            elif action == "auth_success":
+                bubble = line_service.build_auth_success_flex_bubble(
+                    cmd_res["company_name"], 
+                    cmd_res.get("role_name", "管理員"), 
+                    user_id
+                )
+                line_service.reply_flex(reply_token, bubble, alt_text="🎉 企業身份綁定成功！")
+
+            # 3. 列出可選候選場站 /可選場站
+            elif action == "list_candidates":
+                bubble = line_service.build_candidate_sites_flex_bubble(
+                    company_name=cmd_res["company_name"],
+                    candidates=cmd_res.get("candidates", []),
+                    current_count=cmd_res.get("current_count", 0),
+                    max_count=cmd_res.get("max_count", 10)
+                )
+                line_service.reply_flex(reply_token, bubble, alt_text="🏢 可選監控場站清單")
+
+            # 4. 新增場站至個人監控 /新增
+            elif action == "add_subscription":
+                r = cmd_res.get("result", {})
+                if r.get("success"):
+                    details = [
+                        {"label": "新增場站", "value": f"[{r.get('station_code')}] {r.get('station_name')}"},
+                        {"label": "目前監控配額", "value": f"{r.get('current_count')} / {r.get('max_count')} 座場站"},
+                        {"label": "預設車位門檻", "value": "< 5 格"},
+                        {"label": "預設冷卻時間", "value": "車位 6h / 斷線 24h"}
+                    ]
+                    bubble = line_service.build_command_result_flex_bubble(
+                        "場站加入監控成功",
+                        f"已成功將 [{r.get('station_code')}] {r.get('station_name')} 加入您的個人監控清單。",
+                        details,
+                        is_success=True
+                    )
+                else:
+                    bubble = line_service.build_command_result_flex_bubble(
+                        "無法加入監控",
+                        r.get("error", "未知錯誤"),
+                        [],
+                        is_success=False
+                    )
+                line_service.reply_flex(reply_token, bubble, alt_text="新增監控結果")
+
+            # 5. 移除個人監控場站 /移除
+            elif action == "remove_subscription":
+                r = cmd_res.get("result", {})
+                if r.get("success"):
+                    details = [
+                        {"label": "移除場站", "value": r.get("station_name", "")},
+                        {"label": "剩餘監控數", "value": f"{r.get('remaining_count')} / {r.get('max_count')} 座場站"}
+                    ]
+                    bubble = line_service.build_command_result_flex_bubble(
+                        "已移除監控場站",
+                        "已為您釋出配額名額，可輸入 /可選場站 挑選其他場站加入監控。",
+                        details,
+                        is_success=True
+                    )
+                else:
+                    bubble = line_service.build_command_result_flex_bubble(
+                        "移除失敗",
+                        r.get("error", "未知錯誤"),
+                        [],
+                        is_success=False
+                    )
+                line_service.reply_flex(reply_token, bubble, alt_text="移除監控結果")
+
+            # 6. 教學手冊 /?
+            elif action == "help":
                 bubble = line_service.build_help_flex_bubble(user_id, cmd_res.get("profile"))
                 line_service.reply_flex(reply_token, bubble, alt_text="📖 管理員指令教學手冊")
+
+            # 7. 查詢個人監控場站 /查詢
             elif action == "query":
                 bubble = line_service.build_query_settings_flex_bubble(
                     cmd_res["company_name"], 
-                    cmd_res.get("settings", [])
+                    cmd_res.get("settings", []),
+                    max_count=cmd_res.get("max_count", 10)
                 )
-                line_service.reply_flex(reply_token, bubble, alt_text="📋 轄下場站警報設定總覽")
+                line_service.reply_flex(reply_token, bubble, alt_text="📋 我的個人監控場站清單")
+
+            # 8. 車位門檻設定 /車位
             elif action == "space_update":
                 r = cmd_res.get("result", {})
                 if r.get("success"):
@@ -103,6 +183,8 @@ if line_service.handler:
                         is_success=False
                     )
                 line_service.reply_flex(reply_token, bubble, alt_text="車位設定結果")
+
+            # 9. 冷卻設定 /冷卻
             elif action == "cooldown_update":
                 r = cmd_res.get("result", {})
                 if r.get("success"):
@@ -126,28 +208,51 @@ if line_service.handler:
                         is_success=False
                     )
                 line_service.reply_flex(reply_token, bubble, alt_text="冷卻設定結果")
+
+            # 10. 超級管理者指令: 檢視全域參數 /參數
+            elif action == "list_configs":
+                configs = cmd_res.get("configs", {})
+                bubble = line_service.build_system_configs_flex_bubble(configs)
+                line_service.reply_flex(reply_token, bubble, alt_text="⚙️ 系統全域參數控制台")
+
+            # 11. 超級管理者指令: 修改全域參數成功
+            elif action == "config_updated":
+                t_key = cmd_res.get("target_key", "")
+                t_val = cmd_res.get("target_value", "")
+                configs = cmd_res.get("configs", {})
+                bubble = line_service.build_system_configs_flex_bubble(configs)
+                line_service.reply_flex(reply_token, bubble, alt_text=f"⚙️ 參數 {t_key} 已更新為 {t_val}")
+
+            # 12. 超級管理者指令: 全系統靜音 /靜音
+            elif action == "system_mute":
+                msg = cmd_res.get("message", "🔕 全系統靜音已啟動！")
+                line_service.reply_text(reply_token, msg)
+
+            # 13. 超級管理者指令: 解除靜音 /解除靜音
+            elif action == "system_unmute":
+                msg = cmd_res.get("message", "🔔 全系統靜音已解除！")
+                line_service.reply_text(reply_token, msg)
+
             elif action == "error":
                 line_service.reply_text(reply_token, f"⚠️ {cmd_res.get('error')}")
-            elif action == "unauthorized":
-                line_service.reply_text(
-                    reply_token,
-                    f"🔒 存取受限：\n{cmd_res.get('error')}\n\n如需開通管理權限，請提供您的 LINE User ID 給系統管理員。"
-                )
+
             else:
                 profile = cmd_res.get("profile")
-                cname = profile.get("company_name", "訪客") if profile else "訪客"
-                role = profile.get("role_name", "未授權") if profile else "未授權"
+                cname = profile.get("company_name", "微程式") if profile else "微程式"
+                role = profile.get("role_name", "管理員") if profile else "管理員"
+                sub_cnt = cmd_res.get("sub_count", 0)
                 line_service.reply_text(
                     reply_token,
-                    f"👋 您好！我是「場站監控推播機器人」。\n\n"
+                    f"👋 您好！我是「場站監控中心機器人」。\n\n"
                     f"🏢 身份：{cname} ({role})\n"
-                    f"🔑 您的 LINE User ID：\n👉 {user_id}\n\n"
-                    f"🤖 您可以直接跟我說話設定場站，例如：\n"
-                    f"•「幫我把撫遠場車位少於 5 個時警報」\n"
-                    f"•「安和站車位剩不到 10 格就提醒」\n"
-                    f"•「撫遠場斷線先靜音 12 小時」\n"
-                    f"•「查一下我的場站設定」\n\n"
-                    f"💡 亦可隨時輸入「/?」開啟管理員手冊！"
+                    f"📊 目前個人監控：{sub_cnt} / 10 座場站\n\n"
+                    f"🤖 常用指令：\n"
+                    f"• /可選場站 (瀏覽可加入的名單)\n"
+                    f"• /新增 [代號] (加入個人監控，例：/新增 01)\n"
+                    f"• /移除 [代號] (取消監控)\n"
+                    f"• /查詢 (查看我的監控與門檻)\n"
+                    f"• 亦可直接說「撫遠場車位少於5個時警報」\n\n"
+                    f"💡 輸入「/?」即可開啟詳細指令手冊！"
                 )
     except Exception as e:
         logger.error(f"Failed to bind custom LINE message handler: {e}")
@@ -179,7 +284,7 @@ async def trigger_anomaly_notification(
 ):
     """
     交接觸發端點：
-    接收模組一 (爬蟲) 發送的喚醒訊號，比對試算表數值並執行多租戶與角色隔離推播。
+    接收模組一 (爬蟲) 發送的喚醒訊號，比對試算表數值並執行個人化與多租戶隔離推播。
     """
     expected_secret = os.getenv("NOTIFY_TRIGGER_SECRET", "")
     if expected_secret:
@@ -190,15 +295,27 @@ async def trigger_anomaly_notification(
                 detail="Invalid or missing X-Trigger-Token authentication header."
             )
 
-    logger.info("Trigger received. Starting anomaly evaluation and multi-tenant dispatch...")
+    logger.info("Trigger received. Starting anomaly evaluation and personal dispatch...")
 
-    # 1. 抓取最新營運數據、多租戶權限表、場站警報設定、最後警報冷卻紀錄
+    # 0. 檢查全系統靜音狀態 (Maintenance Mode 防超支保護開關)
+    sys_configs = sheets_service.fetch_system_configs()
+    if str(sys_configs.get("maintenance_mode", "OFF")).strip().upper() == "ON":
+        logger.warning("Maintenance mode is ON (全系統靜音中). Suppressing all alert push notifications.")
+        return {
+            "status": "muted",
+            "message": "全系統靜音中 (maintenance_mode: ON)，已略過所有異常推播發送以防止額度超支。",
+            "total_stations_checked": 0,
+            "total_anomalies": 0,
+            "total_alerts_dispatched": 0,
+            "delivery_breakdown": []
+        }
+
+    # 1. 抓取最新營運數據、場站警報設定、最後警報冷卻紀錄
     operations_data = sheets_service.fetch_operations_data()
-    tenant_permissions = sheets_service.fetch_tenant_permissions()
     alert_settings = sheets_service.fetch_alert_settings()
     cooldown_history = sheets_service.fetch_cooldown_history()
 
-    # 2. 條件判斷：篩選車位與斷線異常 (結合冷卻判定與自訂上下限，全面移除發票警報)
+    # 2. 條件判斷：篩選車位與斷線異常
     anomalies, newly_triggered = TenantService.filter_anomalies(
         operations_data=operations_data,
         alert_settings=alert_settings,
@@ -215,42 +332,67 @@ async def trigger_anomaly_notification(
             "alerts_dispatched": 0
         }
 
-    # 3. 雙重隔離：比對權限表，分流不同企業與角色 (甲/乙)
-    dispatch_plans = TenantService.map_anomalies_to_roles(anomalies, tenant_permissions)
+    # 3. 個人化派發：比對「個人監控場站表」
+    all_subs = sheets_service.fetch_all_user_subscriptions()
+    tenant_permissions = sheets_service.fetch_tenant_permissions()
 
-    # 4. 精準推播：針對各企業角色授權的 LINE User ID 推送專屬警示
     dispatched_count = 0
     delivery_reports = []
 
-    for plan in dispatch_plans:
-        cid = plan["company_id"]
-        cname = plan["company_name"]
-        role_name = plan["role_name"]
-        line_users = plan["line_user_ids"]
-        role_anomalies = plan["anomalies"]
+    if all_subs:
+        user_plans = TenantService.map_anomalies_to_users(
+            anomalies=anomalies,
+            all_subscriptions=all_subs,
+            tenant_permissions=tenant_permissions,
+            cooldown_history=cooldown_history
+        )
+        for plan in user_plans:
+            uid = plan["line_user_id"]
+            cname = plan["company_name"]
+            role_name = plan["role_name"]
+            role_anomalies = plan["anomalies"]
 
-        delivered_users = []
-        for uid in line_users:
             success = line_service.send_role_anomaly_alert(uid, cname, role_name, role_anomalies)
             if success:
-                delivered_users.append(uid)
                 dispatched_count += 1
+                delivery_reports.append({
+                    "line_user_id": uid,
+                    "company_name": cname,
+                    "anomalies_count": len(role_anomalies)
+                })
+                # 每成功推播 1 則，累加計數並檢查 195 瀕危門檻
+                new_count, just_reached = sheets_service.increment_monthly_push_count(1)
+                if just_reached:
+                    super_uids = sheets_service.fetch_super_admin_user_ids()
+                    warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)
+                    for s_uid in super_uids:
+                        line_service.push_flex(s_uid, warn_bubble, alt_text="🚨 LINE 推播用量瀕危警告 (195/200)")
+    else:
+        # 備援派發方案
+        dispatch_plans = TenantService.map_anomalies_to_roles(anomalies, tenant_permissions)
+        for plan in dispatch_plans:
+            cname = plan["company_name"]
+            role_name = plan["role_name"]
+            line_users = plan["line_user_ids"]
+            role_anomalies = plan["anomalies"]
+            for uid in line_users:
+                success = line_service.send_role_anomaly_alert(uid, cname, role_name, role_anomalies)
+                if success:
+                    dispatched_count += 1
+                    new_count, just_reached = sheets_service.increment_monthly_push_count(1)
+                    if just_reached:
+                        super_uids = sheets_service.fetch_super_admin_user_ids()
+                        warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)
+                        for s_uid in super_uids:
+                            line_service.push_flex(s_uid, warn_bubble, alt_text="🚨 LINE 推播用量瀕危警告 (195/200)")
 
-        delivery_reports.append({
-            "company_id": cid,
-            "company_name": cname,
-            "role_name": role_name,
-            "anomalies_count": len(role_anomalies),
-            "delivered_users": delivered_users
-        })
-
-    # 5. 記錄推播時間到「最後警報紀錄」以實現冷卻週期防洗版
+    # 4. 記錄推播時間到「最後警報紀錄」以實現冷卻週期防洗版
     if newly_triggered and dispatched_count > 0:
         sheets_service.record_alert_triggers(newly_triggered)
 
     return {
         "status": "success",
-        "message": f"Evaluated {len(operations_data)} stations. Found {len(anomalies)} anomalies across {len(dispatch_plans)} role targets.",
+        "message": f"Evaluated {len(operations_data)} stations. Dispatched {dispatched_count} alerts.",
         "total_stations_checked": len(operations_data),
         "total_anomalies": len(anomalies),
         "total_alerts_dispatched": dispatched_count,

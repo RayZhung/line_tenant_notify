@@ -123,6 +123,288 @@ class LineService:
             return False
 
     @staticmethod
+    def build_auth_request_flex_bubble(user_id: str) -> Dict[str, Any]:
+        """
+        建構未授權使用者提示輸入「企業授權碼」的 Flex 卡片
+        """
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#1E293B",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "🔒 歡迎加入場站監控中心",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": "初次使用身分驗證",
+                        "color": "#94A3B8",
+                        "size": "xs",
+                        "margin": "xs"
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "為了落實 ISO27001 企業資安隔離與資料保護，請在對話框中直接輸入您的【企業授權碼】以完成綁定：",
+                        "size": "sm",
+                        "color": "#334155",
+                        "wrap": True
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "paddingAll": "10px",
+                        "backgroundColor": "#F1F5F9",
+                        "cornerRadius": "6px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "💡 提示範例：",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#475569"
+                            },
+                            {
+                                "type": "text",
+                                "text": "請直接輸入公司配發的專屬授權碼，例如：micro89798198 或 DG515555",
+                                "size": "xxs",
+                                "color": "#64748B",
+                                "wrap": True,
+                                "margin": "xs"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "10px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"您的 LINE User ID:\n{user_id}",
+                        "size": "xxs",
+                        "color": "#94A3B8",
+                        "align": "center",
+                        "wrap": True
+                    }
+                ]
+            }
+        }
+        return bubble
+
+    @staticmethod
+    def build_auth_success_flex_bubble(company_name: str, role_name: str, user_id: str) -> Dict[str, Any]:
+        """
+        建構授權綁定成功的歡迎 Flex 卡片
+        """
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#16A34A",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "🎉 企業身份綁定成功！",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"🏢 授權企業: {company_name} ｜ 👤 角色: {role_name}",
+                        "color": "#DCFCE7",
+                        "size": "xs",
+                        "margin": "xs",
+                        "weight": "bold"
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"歡迎您！您已獲取【{company_name}】之場站管理權限。每個管理者最高可自主挑選 10 座場站 加入個人監控：",
+                        "size": "xs",
+                        "color": "#334155",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "md"},
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "🚀 快速開始指南：",
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#0F172A"
+                            },
+                            {
+                                "type": "text",
+                                "text": "1. 輸入 /可選場站 瀏覽可加入的名單\n2. 輸入 /新增 01 將代號 01 場站加入監控\n3. 輸入 /車位 01 5 30 調整車位警報標準\n4. 隨時輸入 /? 查看所有指令手冊",
+                                "size": "xs",
+                                "color": "#475569",
+                                "wrap": True,
+                                "margin": "xs"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "12px",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#16A34A",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "📋 查看可加入的場站",
+                            "text": "/可選場站"
+                        }
+                    }
+                ]
+            }
+        }
+        return bubble
+
+    @staticmethod
+    def build_candidate_sites_flex_bubble(
+        company_name: str,
+        candidates: List[Dict[str, Any]],
+        current_count: int,
+        max_count: int = 10
+    ) -> Dict[str, Any]:
+        """
+        建構 /可選場站 清單卡片
+        """
+        rows = []
+        for c in candidates[:15]:  # 顯示前 15 場
+            code = c.get("station_code", "00")
+            sname = c.get("station_name", "未知")
+            is_sub = c.get("is_subscribed", False)
+
+            status_tag = "已監控" if is_sub else "可新增"
+            tag_color = "#94A3B8" if is_sub else "#16A34A"
+
+            rows.append({
+                "type": "box",
+                "layout": "horizontal",
+                "margin": "sm",
+                "paddingAll": "6px",
+                "backgroundColor": "#F8FAFC",
+                "cornerRadius": "4px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"[{code}] {sname}",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": "#0F172A",
+                        "flex": 4
+                    },
+                    {
+                        "type": "text",
+                        "text": status_tag,
+                        "size": "xxs",
+                        "color": tag_color,
+                        "weight": "bold",
+                        "align": "end",
+                        "flex": 1
+                    }
+                ]
+            })
+
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#0284C7",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "🏢 可選監控場站清單",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"所屬企業: {company_name} ｜ 目前監控配額: {current_count} / {max_count} 場",
+                        "color": "#E0F2FE",
+                        "size": "xs",
+                        "margin": "xs",
+                        "weight": "bold"
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"請挑選您要監控的場站代號，輸入「/新增 代號」即可完成綁定：",
+                        "size": "xs",
+                        "color": "#475569",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "sm"},
+                    *rows
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "10px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "💡 範例：輸入「/新增 01」或「/移除 01」",
+                        "size": "xxs",
+                        "color": "#64748B",
+                        "align": "center"
+                    }
+                ]
+            }
+        }
+        return bubble
+
+    @staticmethod
     def build_help_flex_bubble(user_id: str, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         建構 /? 指令教學手冊 Flex Message 卡片
@@ -169,7 +451,7 @@ class LineService:
                         "wrap": True
                     },
                     {"type": "separator", "margin": "sm"},
-                    # 指令 1: 查詢
+                    # 指令 1: 選站與新增
                     {
                         "type": "box",
                         "layout": "vertical",
@@ -177,7 +459,32 @@ class LineService:
                         "contents": [
                             {
                                 "type": "text",
-                                "text": "1️⃣ 查詢場站設定",
+                                "text": "1️⃣ 挑選與新增監控場站 (上限 10 場)",
+                                "weight": "bold",
+                                "size": "sm",
+                                "color": "#0F172A"
+                            },
+                            {
+                                "type": "text",
+                                "text": "👉 /可選場站：列出所有可加入的場站\n👉 /新增 [代號或名稱]：加入個人監控 (例：/新增 01)\n👉 /移除 [代號或名稱]：取消監控 (例：/移除 01)",
+                                "size": "xs",
+                                "color": "#2563EB",
+                                "weight": "bold",
+                                "margin": "xs",
+                                "wrap": True
+                            }
+                        ]
+                    },
+                    {"type": "separator", "margin": "sm"},
+                    # 指令 2: 查詢
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "2️⃣ 查詢我的監控清單",
                                 "weight": "bold",
                                 "size": "sm",
                                 "color": "#0F172A"
@@ -192,7 +499,7 @@ class LineService:
                             },
                             {
                                 "type": "text",
-                                "text": "列出您所屬公司所有場站之車位上下限與冷卻時數。",
+                                "text": "查看您正在監控的場站 (X/10 場) 與各場即時門檻。",
                                 "size": "xxs",
                                 "color": "#64748B",
                                 "wrap": True
@@ -231,7 +538,6 @@ class LineService:
                         ]
                     },
                     {"type": "separator", "margin": "sm"},
-                    # 指令 3: 冷卻時間
                     {
                         "type": "box",
                         "layout": "vertical",
@@ -239,7 +545,7 @@ class LineService:
                         "contents": [
                             {
                                 "type": "text",
-                                "text": "3️⃣ 警報冷卻防洗版設定",
+                                "text": "4️⃣ 警報冷卻防洗版設定",
                                 "weight": "bold",
                                 "size": "sm",
                                 "color": "#0F172A"
@@ -294,64 +600,97 @@ class LineService:
         return bubble
 
     @staticmethod
-    def build_query_settings_flex_bubble(company_name: str, settings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def build_query_settings_flex_bubble(company_name: str, settings: List[Dict[str, Any]], max_count: int = 10) -> Dict[str, Any]:
         """
-        建構 /查詢 結果卡片
+        建構 /查詢 個人監控場站卡片 (上限 10 場)
         """
         rows = []
-        for s in settings[:12]:  # LINE Flex 限制每卡片內容數量，超過可分頁
-            sname = s.get("station_name", "未知")
-            s_low = s.get("space_lower", "5")
-            s_up = s.get("space_upper", "無")
-            s_cool = s.get("space_cooldown", "6")
-            off_cool = s.get("offline_cooldown", "24")
-
+        if not settings:
             rows.append({
                 "type": "box",
                 "layout": "vertical",
-                "margin": "sm",
-                "paddingAll": "8px",
+                "margin": "md",
+                "paddingAll": "12px",
                 "backgroundColor": "#F8FAFC",
                 "cornerRadius": "6px",
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"🅿️ {sname}",
-                        "weight": "bold",
-                        "size": "sm",
-                        "color": "#0F172A"
-                    },
-                    {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "margin": "xs",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"車位門檻: 下限 {s_low} / 上限 {s_up}",
-                                "size": "xs",
-                                "color": "#475569",
-                                "flex": 3
-                            },
-                            {
-                                "type": "text",
-                                "text": f"冷卻: {s_cool}h",
-                                "size": "xs",
-                                "color": "#2563EB",
-                                "align": "end",
-                                "flex": 1
-                            }
-                        ]
-                    },
-                    {
-                        "type": "text",
-                        "text": f"斷線冷卻: {off_cool} 小時",
-                        "size": "xxs",
+                        "text": "您目前尚未加入任何監控場站（最多可自選 10 座）。",
+                        "size": "xs",
                         "color": "#64748B",
-                        "margin": "xxs"
+                        "wrap": True
+                    },
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#0284C7",
+                        "height": "sm",
+                        "margin": "md",
+                        "action": {
+                            "type": "message",
+                            "label": "📋 查看可選場站清單",
+                            "text": "/可選場站"
+                        }
                     }
                 ]
             })
+        else:
+            for s in settings[:10]:
+                code = s.get("station_code") or ""
+                code_prefix = f"[{code}] " if code else ""
+                sname = s.get("station_name", "未知")
+                s_low = s.get("space_lower", "5")
+                s_up = s.get("space_upper", "無")
+                s_cool = s.get("space_cooldown", "6")
+                off_cool = s.get("offline_cooldown", "24")
+
+                rows.append({
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "sm",
+                    "paddingAll": "8px",
+                    "backgroundColor": "#F8FAFC",
+                    "cornerRadius": "6px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"🅿️ {code_prefix}{sname}",
+                            "weight": "bold",
+                            "size": "sm",
+                            "color": "#0F172A"
+                        },
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "margin": "xs",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": f"車位門檻: 下限 {s_low} / 上限 {s_up}",
+                                    "size": "xs",
+                                    "color": "#475569",
+                                    "flex": 3
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"冷卻: {s_cool}h",
+                                    "size": "xs",
+                                    "color": "#2563EB",
+                                    "align": "end",
+                                    "flex": 1
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": f"斷線冷卻: {off_cool} 小時",
+                            "size": "xxs",
+                            "color": "#64748B",
+                            "margin": "xxs"
+                        }
+                    ]
+                })
 
         bubble = {
             "type": "bubble",
@@ -364,14 +703,14 @@ class LineService:
                 "contents": [
                     {
                         "type": "text",
-                        "text": "📋 轄下場站警報設定總覽",
+                        "text": "📋 我的個人監控場站清單",
                         "weight": "bold",
                         "color": "#FFFFFF",
                         "size": "lg"
                     },
                     {
                         "type": "text",
-                        "text": f"🏢 企業: {company_name} ｜ 共 {len(settings)} 個場站",
+                        "text": f"🏢 企業: {company_name} ｜ 監控中: {len(settings)} / {max_count} 座場站",
                         "color": "#E0F2FE",
                         "size": "xs",
                         "margin": "xs",
@@ -386,7 +725,7 @@ class LineService:
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"以下為目前生效中的車位門檻與防洗版冷卻設定 (顯示前 {min(len(settings), 12)} 場)：",
+                        "text": f"以下為您自選監控的場站與告警門檻 (上限 {max_count} 場)：",
                         "size": "xs",
                         "color": "#64748B",
                         "wrap": True
@@ -660,6 +999,288 @@ class LineService:
             }
         }
         return flex_bubble
+
+    @staticmethod
+    def build_emergency_push_warning_flex_bubble(
+        current_count: int,
+        warning_threshold: int = 195,
+        max_limit: int = 200
+    ) -> Dict[str, Any]:
+        """
+        建構每月推播則數瀕臨 195 則上限的超級管理者緊急告警卡片 (附一鍵靜音按鈕)
+        """
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#DC2626",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "🚨 LINE 推播用量瀕危警告",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"⚠️ 本月累積推播已達 {current_count} / {max_limit} 則！",
+                        "color": "#FEF2F2",
+                        "size": "xs",
+                        "margin": "xs",
+                        "weight": "bold"
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "本系統運作於 LINE 官方帳號免費方案 (Light Plan)，每月免費推播訊息上限為 200 則。為避免衍生超額扣款或額度耗盡，系統特此發出高警戒通知！",
+                        "size": "xs",
+                        "color": "#475569",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "md"},
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "backgroundColor": "#FEF2F2",
+                        "cornerRadius": "8px",
+                        "paddingAll": "12px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "📊 當前額度狀態：",
+                                "weight": "bold",
+                                "size": "xs",
+                                "color": "#991B1B"
+                            },
+                            {
+                                "type": "text",
+                                "text": f"• 已發送：{current_count} 則\n• 剩餘免費用量：僅剩 {max(0, max_limit - current_count)} 則\n• 建議措施：立即啟動全系統靜音，停止警報推播",
+                                "size": "xs",
+                                "color": "#B91C1C",
+                                "margin": "xs",
+                                "wrap": True
+                            }
+                        ]
+                    },
+                    {
+                        "type": "text",
+                        "text": "💡 提示：靜音後各場站仍會持續執行巡檢與紀錄，唯暫停主動發送 LINE 推播。管理者仍可隨時在對話框中手動查詢各站狀態。",
+                        "size": "xxs",
+                        "color": "#64748B",
+                        "margin": "md",
+                        "wrap": True
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#DC2626",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "🔕 一鍵啟動全系統靜音 (防超支)",
+                            "text": "/靜音"
+                        }
+                    },
+                    {
+                        "type": "button",
+                        "style": "secondary",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "⚙️ 檢視全域參數設定",
+                            "text": "/參數"
+                        }
+                    }
+                ]
+            }
+        }
+        return bubble
+
+    @staticmethod
+    def build_system_configs_flex_bubble(configs: Dict[str, str]) -> Dict[str, Any]:
+        """
+        建構超級管理者檢視與管理「系統全域參數」的 Flex Message 卡片
+        """
+        max_stn = configs.get("max_stations_per_user", "10")
+        m_mode = configs.get("maintenance_mode", "OFF").upper()
+        p_count = configs.get("monthly_push_count", "0")
+        p_warn = configs.get("monthly_push_warning", "195")
+        cur_m = configs.get("current_count_month", "-")
+
+        mode_badge = "🔴 靜音中 (已暫停推播)" if m_mode == "ON" else "🟢 正常監控推播中"
+        mode_btn_text = "🔔 解除靜音 (恢復推播)" if m_mode == "ON" else "🔕 啟動全系統靜音"
+        mode_btn_cmd = "/解除靜音" if m_mode == "ON" else "/靜音"
+        mode_btn_color = "#16A34A" if m_mode == "ON" else "#DC2626"
+
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#1E293B",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "⚙️ 系統全域參數控制台",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"👑 超級管理者權限 ｜ 狀態: {mode_badge}",
+                        "color": "#94A3B8",
+                        "size": "xs",
+                        "margin": "xs",
+                        "weight": "bold"
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "16px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "以下為「系統全域參數」目前配置，修改將即時同步至 Google 試算表：",
+                        "size": "xs",
+                        "color": "#475569",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "sm"},
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "spacing": "xs",
+                        "contents": [
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {"type": "text", "text": "每人最大監控場站數", "size": "xs", "color": "#64748B", "flex": 3},
+                                    {"type": "text", "text": f"{max_stn} 座", "size": "xs", "weight": "bold", "color": "#0F172A", "flex": 2, "align": "end"}
+                                ]
+                            },
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {"type": "text", "text": "全系統靜音狀態", "size": "xs", "color": "#64748B", "flex": 3},
+                                    {"type": "text", "text": f"{m_mode}", "size": "xs", "weight": "bold", "color": "#DC2626" if m_mode=="ON" else "#16A34A", "flex": 2, "align": "end"}
+                                ]
+                            },
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {"type": "text", "text": "本月累積推播則數", "size": "xs", "color": "#64748B", "flex": 3},
+                                    {"type": "text", "text": f"{p_count} / 200 則", "size": "xs", "weight": "bold", "color": "#2563EB", "flex": 2, "align": "end"}
+                                ]
+                            },
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {"type": "text", "text": "推播瀕危警告門檻", "size": "xs", "color": "#64748B", "flex": 3},
+                                    {"type": "text", "text": f"{p_warn} 則", "size": "xs", "weight": "bold", "color": "#0F172A", "flex": 2, "align": "end"}
+                                ]
+                            },
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {"type": "text", "text": "計數月份紀錄", "size": "xs", "color": "#64748B", "flex": 3},
+                                    {"type": "text", "text": f"{cur_m}", "size": "xs", "color": "#94A3B8", "flex": 2, "align": "end"}
+                                ]
+                            }
+                        ]
+                    },
+                    {"type": "separator", "margin": "md"},
+                    {
+                        "type": "text",
+                        "text": "📝 修改參數方式：\n輸入「/參數 [參數名稱或鍵值] [新數值]」\n例如：\n• /參數 最大場站數 15\n• /參數 警告門檻 190\n• /參數 推播計數 0",
+                        "size": "xxs",
+                        "color": "#64748B",
+                        "margin": "md",
+                        "wrap": True
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": mode_btn_color,
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": mode_btn_text,
+                            "text": mode_btn_cmd
+                        }
+                    }
+                ]
+            }
+        }
+        return bubble
+
+    def push_flex(self, user_id: str, flex_dict: Dict[str, Any], alt_text: str = "系統重要通知") -> bool:
+        """
+        向指定 LINE User ID 單獨推送 Flex 訊息 (推播 API)
+        """
+        if not self.channel_access_token:
+            logger.info(f"[Mock Push Flex] Target: {user_id}, Alt: {alt_text}")
+            return True
+
+        try:
+            if LINE_SDK_AVAILABLE is True and self.messaging_api:
+                container = FlexContainer.from_json(json.dumps(flex_dict))
+                flex_msg = FlexMessage(alt_text=alt_text, contents=container)
+                request = PushMessageRequest(
+                    to=user_id,
+                    messages=[flex_msg]
+                )
+                self.messaging_api.push_message(request)
+                logger.info(f"Successfully pushed flex message to {user_id}")
+                return True
+            elif LINE_SDK_AVAILABLE == "v2" and hasattr(self, "line_bot_api"):
+                self.line_bot_api.push_message(
+                    user_id,
+                    FlexSendMessage(alt_text=alt_text, contents=flex_dict)
+                )
+                logger.info(f"Successfully pushed v2 flex message to {user_id}")
+                return True
+            else:
+                logger.warning(f"No LINE SDK available to push flex to {user_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to push LINE flex to {user_id}: {e}")
+            return False
 
     def send_role_anomaly_alert(
         self, 

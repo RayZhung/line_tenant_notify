@@ -1,11 +1,11 @@
 """
 多租戶與角色權限隔離服務 (Tenant & Role RBAC Isolation Service)
 核心原則:
-  1. 企業資料絕對隔離 (公司 A 絕對看不到公司 B 的資料)
-  2. 角色職責精準分流 (運維人員【甲】只收設備/連線，營運人員【乙】只收車位)
-  3. 智能警報篩選 (僅保留「可用車位警報」與「斷線警報」，移除發票數量警告)
-  4. 冷卻時間防洗版 (支援 6, 12, 18, 24, 36 小時冷卻)
-  5. LINE Bot 管理指令解析與權限校驗
+  1. 企業授權碼驗證綁定 (首次使用強制輸入授權碼，比對車車戰情室企業名單)
+  2. 管理者自主挑選監控場站 (必須在 site list 內，且每位管理者上限 <= 10 座)
+  3. 企業資料絕對隔離 (公司 A 絕對看不到公司 B 的資料與場站)
+  4. 個人化警報門檻與冷卻防洗版 (6, 12, 18, 24, 36 小時)
+  5. 雙軌自然語言與指令解析 (/?、/可選場站、/新增、/移除、/查詢、/車位、/冷卻)
 """
 import logging
 import re
@@ -16,7 +16,6 @@ from services.nlp_service import NLPService
 
 logger = logging.getLogger("tenant_service")
 
-# 異常類別定義
 CATEGORY_MAP = {
     "CONNECTIVITY": "🔌 場站連線狀態",
     "CAPACITY": "🚗 車流車位狀況"
@@ -30,9 +29,8 @@ class TenantService:
         cooldown_history: Optional[Dict[Tuple[str, str], datetime]] = None
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        篩選出當前異常的場站數據 (支援自訂車位門檻與冷卻防洗版)
-        回傳:
-          (active_anomalies, newly_triggered_for_cooldown)
+        篩選出當前異常的場站數據
+        回傳: (active_anomalies, newly_triggered_for_cooldown)
         """
         settings_map = {}
         if alert_settings:
@@ -62,7 +60,6 @@ class TenantService:
                 if category == "HARDWARE" or "發票" in metric_name:
                     continue
 
-                # 取得該場站專屬警報設定 (若無則套用預設值)
                 stn_setting = settings_map.get(station_name, {})
                 space_lower_raw = stn_setting.get("space_lower", "5")
                 space_upper_raw = stn_setting.get("space_upper", "無")
@@ -89,14 +86,12 @@ class TenantService:
                     cooldown_hours = space_cooldown_hours
                     try:
                         cur_spaces = float(val_raw)
-                        # 檢查下限
                         if str(space_lower_raw).strip() not in ["無", "NONE", "", "-"]:
                             lower_thresh = float(space_lower_raw)
                             if cur_spaces < lower_thresh:
                                 is_anomaly = True
                                 anomaly_desc = f"剩餘車位僅 {int(cur_spaces)} 格 (低於警戒下限 {int(lower_thresh)} 格)"
 
-                        # 檢查上限
                         if str(space_upper_raw).strip() not in ["無", "NONE", "", "-"]:
                             upper_thresh = float(space_upper_raw)
                             if cur_spaces > upper_thresh:
@@ -108,7 +103,7 @@ class TenantService:
                 if not is_anomaly or not detected_category:
                     continue
 
-                # 3. 檢查冷卻時間 (Cooldown check)
+                # 3. 檢查全域冷卻時間
                 history_key = (station_name, detected_category)
                 last_triggered_at = cooldowns.get(history_key)
                 if last_triggered_at:
@@ -116,13 +111,9 @@ class TenantService:
                     limit_sec = cooldown_hours * 3600
                     if elapsed < limit_sec:
                         remaining_min = int((limit_sec - elapsed) / 60)
-                        logger.info(
-                            f"Suppressed {station_name} [{detected_category}] due to cooldown. "
-                            f"(Remaining: {remaining_min} mins)"
-                        )
+                        logger.info(f"Suppressed {station_name} [{detected_category}] (Cooldown remaining: {remaining_min} mins)")
                         continue
 
-                # 符合警報條件且超過冷卻時間，加入派發清單
                 anomaly_item = {
                     "station_name": station_name,
                     "station_ip": station_ip,
@@ -146,14 +137,75 @@ class TenantService:
         return anomalies, newly_triggered
 
     @staticmethod
+    def map_anomalies_to_users(
+        anomalies: List[Dict[str, Any]],
+        all_subscriptions: List[Dict[str, Any]],
+        tenant_permissions: List[Dict[str, Any]],
+        cooldown_history: Optional[Dict[Tuple[str, str], datetime]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        個人化精準派發：
+        依據「個人監控場站表」比對各管理者 (LINE User ID) 自行挑選的 <= 10 座場站，
+        並依據該使用者自訂的車位上下限與冷卻門檻執行派發。
+        """
+        now = datetime.now()
+        cooldowns = cooldown_history or {}
+        user_plans = []
+        user_grouped = {}
+
+        for sub in all_subscriptions:
+            uid = str(sub.get("line_user_id", "")).strip()
+            if uid:
+                user_grouped.setdefault(uid, []).append(sub)
+
+        for uid, subs in user_grouped.items():
+            profile = TenantService.get_user_tenant_profile(uid, tenant_permissions)
+            cname = profile.get("company_name", "微程式") if profile else "微程式"
+            role_name = profile.get("role_name", "管理員") if profile else "管理員"
+
+            user_station_map = {str(s.get("station_name", "")).strip(): s for s in subs}
+            user_anomalies = []
+
+            for item in anomalies:
+                sname = str(item.get("station_name", "")).strip()
+                if sname not in user_station_map:
+                    continue
+
+                sub_cfg = user_station_map[sname]
+                cat = item.get("category", "")
+
+                # 依該使用者在個人監控表自訂的冷卻時數判定
+                if cat == "CONNECTIVITY":
+                    cd_hours = float(sub_cfg.get("offline_cooldown", 24) or 24)
+                else:
+                    cd_hours = float(sub_cfg.get("space_cooldown", 6) or 6)
+
+                history_key = (sname, cat)
+                last_trig = cooldowns.get(history_key)
+                if last_trig:
+                    elapsed = (now - last_trig).total_seconds()
+                    if elapsed < cd_hours * 3600:
+                        continue
+
+                user_anomalies.append(item)
+
+            if user_anomalies:
+                user_plans.append({
+                    "line_user_id": uid,
+                    "company_name": cname,
+                    "role_name": role_name,
+                    "anomalies": user_anomalies
+                })
+
+        return user_plans
+
+    @staticmethod
     def map_anomalies_to_roles(
         anomalies: List[Dict[str, Any]], 
         tenant_permissions: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        雙重隔離映射矩陣：
-          第 1 重：比對 company_id 確保企業資料絕對隔離
-          第 2 重：比對 subscribed_categories 確保角色職責精準分流 (甲收連線、乙收車位)
+        備援全域派發（若無個人訂閱清單時的退守方案）
         """
         dispatch_plans = []
 
@@ -180,7 +232,8 @@ class TenantService:
                 item_cid = item.get("company_id", "")
                 item_cat = item.get("category", "")
 
-                company_matched = (cid == "ALL") or (cid == item_cid) or (cid in item_cid.split(","))
+                item_cids = [c.strip() for c in str(item_cid).split(",") if c.strip()]
+                company_matched = (cid == "ALL") or (cid in item_cids)
                 category_matched = allow_all or (item_cat in subscribed_cats)
 
                 if company_matched and category_matched:
@@ -223,66 +276,120 @@ class TenantService:
         sheets_service: Any
     ) -> Dict[str, Any]:
         """
-        解析並執行管理員指令:
-          1. /? 或 /help -> 指令教學
-          2. /查詢 或 /設定 -> 查詢轄下場站門檻
-          3. /車位 [場站] [下限] [上限] -> 更新車位警報門檻
-          4. /冷卻 [場站|全部] [車位|斷線] [6|12|18|24|36] -> 更新冷卻時數
+        解析並執行管理員指令 (支援初次企業授權碼綁定、10場限制、候選清單選取、自然語言)
         """
         raw_cmd = text.strip()
         permissions = sheets_service.fetch_tenant_permissions()
         profile = TenantService.get_user_tenant_profile(user_id, permissions)
 
-        # 1. 教學指令 /?
-        if raw_cmd in ["/?", "/help", "help", "?", "說明"]:
+        # ----------------------------------------------------
+        # 1. 尚未綁定身份的使用者 (必須先輸入企業授權碼)
+        # ----------------------------------------------------
+        if not profile:
+            # 檢查是否輸入合法的企業授權碼
+            bind_info = sheets_service.bind_user_to_company(user_id, raw_cmd)
+            if bind_info:
+                return {
+                    "action": "auth_success",
+                    "company_name": bind_info["company_name"],
+                    "role_name": "管理員",
+                    "user_id": user_id
+                }
+            else:
+                return {
+                    "action": "auth_required",
+                    "user_id": user_id,
+                    "text": raw_cmd
+                }
+
+        # ----------------------------------------------------
+        # 2. 已綁定身份的使用者
+        # ----------------------------------------------------
+        company_id = profile["company_id"]
+        company_name = profile["company_name"]
+
+        # (1) 教學手冊 /?
+        if raw_cmd in ["/?", "/help", "help", "?", "說明", "功能"]:
             return {
                 "action": "help",
                 "profile": profile,
                 "user_id": user_id
             }
 
-        # 檢查權限：除教學外的指令，必須具備所屬企業授權
-        if not profile:
+        # (2) 列出可選候選場站 /可選場站
+        if raw_cmd in ["/可選場站", "可選場站", "/場站列表", "場站列表", "/候選場站", "有哪些場站可以選", "選場站", "/sites"]:
+            candidates = sheets_service.fetch_candidate_sites(company_id, user_id)
+            current_subs = sheets_service.fetch_user_subscriptions(user_id)
             return {
-                "action": "unauthorized",
-                "user_id": user_id,
-                "error": f"您的 LINE User ID ({user_id}) 尚未被列入「多租戶權限表」，無權變更系統設定。"
+                "action": "list_candidates",
+                "company_name": company_name,
+                "candidates": candidates,
+                "current_count": len(current_subs),
+                "max_count": 10
             }
 
-        company_id = profile["company_id"]
-        company_name = profile["company_name"]
+        # (3) 新增場站至個人監控 /新增 [代號或名稱]
+        if raw_cmd.startswith("/新增") or raw_cmd.startswith("新增") or raw_cmd.startswith("/加入") or raw_cmd.startswith("加入"):
+            parts = re.split(r"\s+", raw_cmd)
+            if len(parts) < 2:
+                return {
+                    "action": "error",
+                    "error": "請指定要新增的場站代號或名稱！\n例如：/新增 01 或 /新增 松山撫遠場"
+                }
+            query_arg = parts[1]
+            res = sheets_service.add_user_subscription(user_id, company_id, query_arg)
+            return {
+                "action": "add_subscription",
+                "company_name": company_name,
+                "result": res
+            }
 
-        # 2. 查詢指令 /查詢 或 /設定
-        if raw_cmd in ["/查詢", "查詢", "/設定", "設定", "/list"]:
-            settings = sheets_service.fetch_alert_settings(company_id=company_id)
+        # (4) 移除個人監控場站 /移除 [代號或名稱]
+        if raw_cmd.startswith("/移除") or raw_cmd.startswith("移除") or raw_cmd.startswith("/刪除") or raw_cmd.startswith("刪除"):
+            parts = re.split(r"\s+", raw_cmd)
+            if len(parts) < 2:
+                return {
+                    "action": "error",
+                    "error": "請指定要移除的場站代號或名稱！\n例如：/移除 01 或 /移除 撫遠"
+                }
+            query_arg = parts[1]
+            res = sheets_service.remove_user_subscription(user_id, query_arg)
+            return {
+                "action": "remove_subscription",
+                "company_name": company_name,
+                "result": res
+            }
+
+        # (5) 查詢個人監控場站 /查詢 或 /設定
+        if raw_cmd in ["/查詢", "查詢", "/設定", "設定", "/list", "我的場站", "/我的場站"]:
+            subs = sheets_service.fetch_user_subscriptions(user_id)
             return {
                 "action": "query",
                 "company_name": company_name,
                 "company_id": company_id,
-                "settings": settings
+                "settings": subs,
+                "max_count": 10
             }
 
-        # 3. 車位設定指令 /車位 [場站] [下限] [上限]
-        # 範例: /車位 復興場 5 30 或 /車位 復興場 5 無 或 /車位 復興場 關閉
+        # (6) 車位設定指令 /車位 [代號或場站] [下限] [上限]
         if raw_cmd.startswith("/車位") or raw_cmd.startswith("車位"):
             parts = re.split(r"\s+", raw_cmd)
             if len(parts) < 3:
                 return {
                     "action": "error",
-                    "error": "車位指令格式錯誤！\n正確格式：\n/車位 [場站名稱] [下限] [上限]\n範例：/車位 復興場 5 30 或 /車位 復興場 5 無"
+                    "error": "車位指令格式：\n/車位 [代號或名稱] [下限] [上限]\n例如：/車位 01 5 30 或 /車位 01 5 無"
                 }
 
             station_query = parts[1]
             lower_arg = parts[2]
             upper_arg = parts[3] if len(parts) >= 4 else "無"
 
-            # 處理關閉
             if lower_arg in ["關閉", "停用", "OFF", "off"]:
                 lower_arg = "無"
                 upper_arg = "無"
 
-            res = sheets_service.update_station_space_threshold(
-                company_id=company_id,
+            res = sheets_service.update_user_station_space(
+                line_user_id=user_id,
                 station_query=station_query,
                 lower=lower_arg,
                 upper=upper_arg
@@ -293,14 +400,13 @@ class TenantService:
                 "result": res
             }
 
-        # 4. 冷卻設定指令 /冷卻 [場站|全部] [車位|斷線] [6|12|18|24|36]
-        # 範例: /冷卻 復興場 車位 12 或 /冷卻 全部 斷線 24
+        # (7) 冷卻設定指令 /冷卻 [代號或全部] [車位|斷線] [6|12|18|24|36]
         if raw_cmd.startswith("/冷卻") or raw_cmd.startswith("冷卻"):
             parts = re.split(r"\s+", raw_cmd)
             if len(parts) < 4:
                 return {
                     "action": "error",
-                    "error": "冷卻指令格式錯誤！\n正確格式：\n/冷卻 [場站名稱或全部] [車位|斷線] [6|12|18|24|36]\n範例：/冷卻 復興場 車位 12"
+                    "error": "冷卻指令格式：\n/冷卻 [代號或全部] [車位|斷線] [6|12|18|24|36]\n例如：/冷卻 01 車位 12"
                 }
 
             station_query = parts[1]
@@ -326,11 +432,11 @@ class TenantService:
                     "error": f"時數必須為整數 (6/12/18/24/36)，您輸入的是「{hours_str}」。"
                 }
 
-            res = sheets_service.update_station_cooldown(
-                company_id=company_id,
+            res = sheets_service.update_user_station_cooldown(
+                line_user_id=user_id,
+                station_query=station_query,
                 alert_type="車位" if "車位" in alert_type_arg else "斷線",
-                hours=hours,
-                station_query=station_query
+                hours=hours
             )
             return {
                 "action": "cooldown_update",
@@ -338,63 +444,137 @@ class TenantService:
                 "result": res
             }
 
-        # 5. 自然語言對話解析 (方案 C：第 1 軌語意規則 + 第 2 軌 Gemini AI 雙軌引擎)
-        settings = sheets_service.fetch_alert_settings(company_id=company_id)
-        allowed_stations = [s.get("station_name") for s in settings if s.get("station_name")]
+        # (8) 超級管理者專屬控制指令: /靜音、/解除靜音、/參數
+        is_super = (str(company_id).strip() in ["0", "ROOT"])
 
-        nlp_res = NLPService.understand_user_message(raw_cmd, allowed_stations=allowed_stations)
+        if raw_cmd in ["/靜音", "靜音", "/全系統靜音", "全系統靜音", "/mute"]:
+            if not is_super:
+                return {
+                    "action": "error",
+                    "error": "⛔ 權限不足：僅有超級管理者 (企業代號 0) 可以啟動全系統靜音！"
+                }
+            sheets_service.update_system_config("maintenance_mode", "ON")
+            return {
+                "action": "system_mute",
+                "message": "🔕 全系統靜音已啟動！\n系統已暫停所有場站的 LINE 異常警報推播（包含車位與斷線），以防超支或額度耗盡。\n\n如需恢復推播，請輸入「/解除靜音」。"
+            }
+
+        if raw_cmd in ["/解除靜音", "解除靜音", "/恢復通知", "恢復通知", "/unmute"]:
+            if not is_super:
+                return {
+                    "action": "error",
+                    "error": "⛔ 權限不足：僅有超級管理者 (企業代號 0) 可以解除全系統靜音！"
+                }
+            sheets_service.update_system_config("maintenance_mode", "OFF")
+            return {
+                "action": "system_unmute",
+                "message": "🔔 全系統靜音已解除！\n系統已恢復常態異常巡檢與推播發送。"
+            }
+
+        if raw_cmd.startswith("/參數") or raw_cmd.startswith("參數") or raw_cmd.startswith("/config"):
+            if not is_super:
+                return {
+                    "action": "error",
+                    "error": "⛔ 權限不足：僅有超級管理者 (企業代號 0) 可以檢視或修改系統全域參數！"
+                }
+            parts = re.split(r"\s+", raw_cmd)
+            if len(parts) == 1:
+                configs = sheets_service.fetch_system_configs()
+                return {
+                    "action": "list_configs",
+                    "configs": configs
+                }
+            
+            if len(parts) < 3:
+                return {
+                    "action": "error",
+                    "error": "參數修改指令格式：\n/參數 [參數名稱] [數值]\n例如：\n• /參數 最大場站數 15\n• /參數 警告門檻 190\n• /參數 靜音 ON"
+                }
+            
+            p_key_raw = parts[1].strip()
+            p_val = parts[2].strip()
+
+            key_alias_map = {
+                "最大場站數": "max_stations_per_user",
+                "最大場站": "max_stations_per_user",
+                "場站上限": "max_stations_per_user",
+                "max_stations_per_user": "max_stations_per_user",
+                "max_stations": "max_stations_per_user",
+                "靜音": "maintenance_mode",
+                "維護模式": "maintenance_mode",
+                "maintenance_mode": "maintenance_mode",
+                "推播計數": "monthly_push_count",
+                "本月推播": "monthly_push_count",
+                "monthly_push_count": "monthly_push_count",
+                "警告門檻": "monthly_push_warning",
+                "警戒門檻": "monthly_push_warning",
+                "monthly_push_warning": "monthly_push_warning",
+                "預設車位下限": "default_space_lower",
+                "default_space_lower": "default_space_lower",
+                "預設車位冷卻": "default_space_cooldown",
+                "default_space_cooldown": "default_space_cooldown",
+                "預設斷線冷卻": "default_offline_cooldown",
+                "default_offline_cooldown": "default_offline_cooldown"
+            }
+
+            target_key = key_alias_map.get(p_key_raw, p_key_raw)
+            if target_key == "maintenance_mode":
+                p_val = "ON" if p_val.upper() in ["ON", "TRUE", "開啟", "啟動", "靜音"] else "OFF"
+
+            ok = sheets_service.update_system_config(target_key, p_val)
+            if ok:
+                new_configs = sheets_service.fetch_system_configs()
+                return {
+                    "action": "config_updated",
+                    "target_key": target_key,
+                    "target_value": p_val,
+                    "configs": new_configs
+                }
+            else:
+                return {
+                    "action": "error",
+                    "error": f"更新全域參數「{p_key_raw}」失敗，請檢查試算表連線狀態。"
+                }
+
+        # (9) 自然語言對話解析 (方案 C 雙軌 AI 引擎)
+        user_subs = sheets_service.fetch_user_subscriptions(user_id)
+        user_station_names = [s.get("station_name") for s in user_subs if s.get("station_name")]
+
+        nlp_res = NLPService.understand_user_message(raw_cmd, allowed_stations=user_station_names)
         intent = nlp_res.get("intent")
 
         if intent == "help":
-            return {
-                "action": "help",
-                "profile": profile,
-                "user_id": user_id
-            }
+            return {"action": "help", "profile": profile, "user_id": user_id}
         elif intent == "query":
-            return {
-                "action": "query",
-                "company_name": company_name,
-                "company_id": company_id,
-                "settings": settings
-            }
+            return {"action": "query", "company_name": company_name, "company_id": company_id, "settings": user_subs, "max_count": 10}
         elif intent == "set_space":
             stn = nlp_res.get("station_name")
             low = nlp_res.get("lower", "無")
             up = nlp_res.get("upper", "無")
-            res = sheets_service.update_station_space_threshold(
-                company_id=company_id,
+            res = sheets_service.update_user_station_space(
+                line_user_id=user_id,
                 station_query=stn,
                 lower=low,
                 upper=up
             )
-            return {
-                "action": "space_update",
-                "company_name": company_name,
-                "result": res,
-                "is_nlp": True
-            }
+            return {"action": "space_update", "company_name": company_name, "result": res, "is_nlp": True}
         elif intent == "set_cooldown":
             stn = nlp_res.get("station_name", "全部")
             atype = nlp_res.get("alert_type", "車位")
             hrs = nlp_res.get("cooldown_hours", 12)
-            res = sheets_service.update_station_cooldown(
-                company_id=company_id,
+            res = sheets_service.update_user_station_cooldown(
+                line_user_id=user_id,
+                station_query=stn,
                 alert_type=atype,
-                hours=hrs,
-                station_query=stn
+                hours=hrs
             )
-            return {
-                "action": "cooldown_update",
-                "company_name": company_name,
-                "result": res,
-                "is_nlp": True
-            }
+            return {"action": "cooldown_update", "company_name": company_name, "result": res, "is_nlp": True}
 
-        # 6. 未知指令但已授權
+        # (9) 未知口語引導
         return {
             "action": "unknown",
             "user_id": user_id,
             "profile": profile,
-            "text": text
+            "text": text,
+            "sub_count": len(user_subs)
         }
