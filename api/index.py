@@ -273,7 +273,15 @@ def read_root(request: Request):
 @app.get("/health")
 @app.get("/api/health")
 def health_check():
-    return {"status": "healthy", "version": VERSION}
+    return {
+        "status": "healthy",
+        "version": VERSION,
+        "sheets_connected": sheets_service.client is not None,
+        "has_sa_b64": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_BASE64")),
+        "has_sa_file": os.path.exists("service_account.json"),
+        "has_spreadsheet_id": bool(sheets_service.spreadsheet_id),
+        "has_master_spreadsheet_id": bool(sheets_service.master_spreadsheet_id)
+    }
 
 @app.post("/api/v1/trigger")
 @app.post("/v1/trigger")

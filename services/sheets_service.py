@@ -89,27 +89,8 @@ class SheetsService:
         ]
         """
         if not self.client or not self.spreadsheet_id:
-            logger.warning("Sheets client not configured, using fallback test data.")
-            return [
-                {
-                    "station_id": "STN_001",
-                    "station_name": "台北信義站",
-                    "tenant_id": "TENANT_A",
-                    "metric_name": "發票剩餘數量",
-                    "current_value": 8.0,
-                    "threshold": 20.0,
-                    "update_time": "2026-10-22 15:00:00"
-                },
-                {
-                    "station_id": "STN_002",
-                    "station_name": "台中一中站",
-                    "tenant_id": "TENANT_B",
-                    "metric_name": "發票剩餘數量",
-                    "current_value": 55.0,
-                    "threshold": 20.0,
-                    "update_time": "2026-10-22 15:00:00"
-                }
-            ]
+            logger.warning("Sheets client not configured, cannot fetch operations data.")
+            return []
 
         try:
             sh = self.client.open_by_key(self.spreadsheet_id)
@@ -136,21 +117,8 @@ class SheetsService:
         ]
         """
         if not self.client or not self.spreadsheet_id:
-            logger.warning("Sheets client not configured, using fallback tenant permission data.")
-            return [
-                {
-                    "tenant_id": "TENANT_A",
-                    "tenant_name": "優質車行股份有限公司",
-                    "authorized_line_user_ids": "U42607efe1d183ad9503f72a1f0b0553d",
-                    "notify_enabled": True
-                },
-                {
-                    "tenant_id": "TENANT_B",
-                    "tenant_name": "智慧洗車聯盟",
-                    "authorized_line_user_ids": "U_DEMO_TENANT_B",
-                    "notify_enabled": True
-                }
-            ]
+            logger.warning("Sheets client not configured, cannot fetch tenant permissions.")
+            return []
 
         try:
             sh = self.client.open_by_key(self.spreadsheet_id)
