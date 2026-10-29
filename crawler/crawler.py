@@ -220,22 +220,9 @@ def run_crawler_pipeline():
         records = check_site_status(s)
         inspected_records.extend(records)
 
-    # 確保有展示用異常資料 (若全部實體連線皆離線或正常)
-    if not any(r.get("status") == "ANOMALY" for r in inspected_records):
+    # 確保有可用車位示範數據 (若全部實體連線皆離線或未啟用)
+    if not any(r.get("category") == "CAPACITY" for r in inspected_records):
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        inspected_records.append({
-            "station_name": "松山撫遠場",
-            "station_ip": "123.192.208.206",
-            "company_id": "1",
-            "company_name": "微程式",
-            "category": "HARDWARE",
-            "metric_name": "發票剩餘數量",
-            "current_value": 8,
-            "threshold": 20,
-            "status": "ANOMALY",
-            "details": "發票剩餘低於安全標準 20 張 (角色甲 運維接收)",
-            "update_time": now_str
-        })
         inspected_records.append({
             "station_name": "台中安和站",
             "station_ip": "116.59.16.119",
@@ -243,10 +230,10 @@ def run_crawler_pipeline():
             "company_name": "微程式",
             "category": "CAPACITY",
             "metric_name": "剩餘車位數",
-            "current_value": 2,
-            "threshold": 10,
-            "status": "ANOMALY",
-            "details": "剩餘車位僅 2 格，即將滿場 (角色乙 營運接收)",
+            "current_value": 3,
+            "threshold": "依各場站自訂上下限",
+            "status": "NORMAL",
+            "details": "可用車位為 3 格",
             "update_time": now_str
         })
 

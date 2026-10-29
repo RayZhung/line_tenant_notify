@@ -1,0 +1,43 @@
+name: ParkV4 Multi-Tenant Inspection Crawler
+
+on:
+  schedule:
+    # 每 15 分鐘全自動巡檢一次 (公有專案 Public Repo 享無限分鐘數完全免費)
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    # 支援在 GitHub 網頁手動一鍵觸發測試
+
+concurrency:
+  group: parkv4-crawler
+  cancel-in-progress: false
+
+jobs:
+  inspect-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute ParkV4 Crawler & Sync to Sheets
+        env:
+          GOOGLE_SERVICE_ACCOUNT_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}
+          MASTER_SPREADSHEET_ID: ${{ secrets.MASTER_SPREADSHEET_ID }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          VERCEL_NOTIFY_URL: ${{ secrets.VERCEL_NOTIFY_URL }}
+          NOTIFY_TRIGGER_SECRET: ${{ secrets.NOTIFY_TRIGGER_SECRET }}
+        run: |
+          python crawler/crawler.py
+
