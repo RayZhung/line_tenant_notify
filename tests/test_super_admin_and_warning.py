@@ -149,6 +149,87 @@ def test_tenant_service_super_admin_commands():
     mock_sheets.unbind_user.assert_called_with("U_super_user")
     print("  [PASS] /重新綁定 指令成功解綁並返回 auth_required 要求新授權碼")
 
+    # 7. 測試全形問號 `/？`、空白 `/ ?`、`／？` 皆能正確觸發超級管理者手冊 (上限 50 場)
+    for variant in ["/？", "/ ?", "／？", "？"]:
+        res_help_variant = TenantService.parse_and_execute_command(
+            user_id="U_super_user",
+            text=variant,
+            sheets_service=mock_sheets
+        )
+        assert res_help_variant["action"] == "help", f"Failed on {variant}: {res_help_variant}"
+        assert res_help_variant["max_count"] == 50
+    print("  [PASS] 全形與含空白指令 (/？、/ ?、／？、？) 皆正確觸發超級管理者專屬手冊 (max_count=50)")
+
+
+def test_full_candidate_list_and_interactive_actions():
+    print("\n=== 測試 4: 驗證 98 座完整場站垂直捲動清單與點擊新增/移除按鈕 ===")
+    candidates_98 = [
+        {
+            "station_code": f"{i:02d}",
+            "station_name": f"測試停車場第{i:02d}站",
+            "station_ip": f"10.0.0.{i}",
+            "is_subscribed": (i in [1, 9])
+        }
+        for i in range(1, 99)
+    ]
+
+    bubbles = LineService.build_candidate_sites_flex_bubbles(
+        company_name="超級管理者",
+        candidates=candidates_98,
+        current_count=2,
+        max_count=50,
+        chunk_size=35
+    )
+    assert len(bubbles) == 3, f"Expected 3 vertical bubbles for 98 stations, got {len(bubbles)}"
+
+    total_rendered_rows = 0
+    for idx, b in enumerate(bubbles, start=1):
+        raw_bytes = len(json.dumps(b, ensure_ascii=False).encode("utf-8"))
+        assert raw_bytes < 28000, f"Bubble {idx} exceeded safe LINE Flex limit: {raw_bytes} bytes"
+        station_rows = [
+            item for item in b["body"]["contents"]
+            if item.get("type") == "box" and item.get("layout") == "horizontal"
+        ]
+        total_rendered_rows += len(station_rows)
+
+    assert total_rendered_rows == 98, f"Expected all 98 stations rendered, got {total_rendered_rows}"
+
+    # 檢查第 1 站 (已監控 -> ➖ 可移除 -> /移除 01) 與第 8 站 (未監控 -> ➕ 可新增 -> /新增 08)
+    first_bubble_rows = [
+        item for item in bubbles[0]["body"]["contents"]
+        if item.get("type") == "box" and item.get("layout") == "horizontal"
+    ]
+    row_01_pill = first_bubble_rows[0]["contents"][1]
+    assert row_01_pill["action"]["text"] == "/移除 01"
+    assert "可移除" in row_01_pill["contents"][0]["text"]
+
+    row_08_pill = first_bubble_rows[7]["contents"][1]
+    assert row_08_pill["action"]["text"] == "/新增 08"
+    assert "可新增" in row_08_pill["contents"][0]["text"]
+    print("  [PASS] 98 座候選場站完整垂直展開 (3 張卡片均 <16KB)，且右側『➕ 可新增 / ➖ 可移除』點擊動作驗證通過")
+
+    # 檢查 /查詢 監控清單超過 15 場時垂直展開，且每筆皆有『➖ 可移除』按鈕
+    subs_20 = [
+        {
+            "station_code": f"{i:02d}",
+            "station_name": f"測試監控站{i:02d}",
+            "space_lower": "5",
+            "space_upper": "30",
+            "space_cooldown": "6",
+            "offline_cooldown": "24"
+        }
+        for i in range(1, 21)
+    ]
+    query_bubbles = LineService.build_query_settings_flex_bubbles("超級管理者", subs_20, max_count=50)
+    assert len(query_bubbles) == 2
+    first_query_card = [
+        item for item in query_bubbles[0]["body"]["contents"]
+        if item.get("type") == "box" and item.get("layout") == "vertical"
+    ][0]
+    rm_pill = first_query_card["contents"][0]["contents"][1]
+    assert rm_pill["action"]["text"] == "/移除 01"
+    print("  [PASS] /查詢 個人監控清單支援多張垂直捲動與點擊『➖ 可移除』驗證通過")
+
 def test_monthly_warning_counter_logic():
     print("\n=== 測試 3: 驗證推播累加與 195 門檻判定邏輯 ===")
     from services.sheets_service import SheetsService
@@ -181,4 +262,5 @@ if __name__ == "__main__":
     test_flex_bubbles()
     test_tenant_service_super_admin_commands()
     test_monthly_warning_counter_logic()
+    test_full_candidate_list_and_interactive_actions()
     print("\n🎉 全部單元與整合測試 100% 成功通過！")

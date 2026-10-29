@@ -68,31 +68,48 @@ class LineService:
 
     def reply_flex(self, reply_token: str, flex_dict: Dict[str, Any], alt_text: str = "訊息回覆") -> bool:
         """
-        使用 reply_token 回覆 Flex Message
+        使用 reply_token 回覆單張 Flex Message
         """
+        return self.reply_flex_list(reply_token, [flex_dict], alt_text=alt_text)
+
+    def reply_flex_list(self, reply_token: str, flex_dicts: List[Dict[str, Any]], alt_text: str = "訊息回覆") -> bool:
+        """
+        使用單一 reply_token 一次垂直回覆多張 Flex Message 卡片 (LINE 單次回覆上限 5 則，完全免費不扣 Push 額度)
+        """
+        if not flex_dicts:
+            return False
+
+        target_dicts = flex_dicts[:5]
         if not self.channel_access_token:
-            logger.info(f"[Mock Reply Flex] {alt_text}")
+            logger.info(f"[Mock Reply Flex List x{len(target_dicts)}] {alt_text}")
             return True
 
         try:
             if LINE_SDK_AVAILABLE is True and self.messaging_api:
-                container = FlexContainer.from_json(json.dumps(flex_dict))
-                flex_msg = FlexMessage(alt_text=alt_text, contents=container)
+                messages = []
+                for idx, fd in enumerate(target_dicts):
+                    container = FlexContainer.from_json(json.dumps(fd))
+                    label_alt = alt_text if len(target_dicts) == 1 else f"{alt_text} ({idx + 1}/{len(target_dicts)})"
+                    messages.append(FlexMessage(alt_text=label_alt, contents=container))
                 self.messaging_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=reply_token,
-                        messages=[flex_msg]
+                        messages=messages
                     )
                 )
                 return True
             elif LINE_SDK_AVAILABLE == "v2" and hasattr(self, "line_bot_api"):
-                self.line_bot_api.reply_message(
-                    reply_token,
-                    FlexSendMessage(alt_text=alt_text, contents=flex_dict)
-                )
+                messages = [
+                    FlexSendMessage(
+                        alt_text=alt_text if len(target_dicts) == 1 else f"{alt_text} ({idx + 1}/{len(target_dicts)})",
+                        contents=fd
+                    )
+                    for idx, fd in enumerate(target_dicts)
+                ]
+                self.line_bot_api.reply_message(reply_token, messages)
                 return True
         except Exception as e:
-            logger.error(f"Failed to reply Flex message: {e}")
+            logger.error(f"Failed to reply Flex message list: {e}")
             return False
 
     def reply_text(self, reply_token: str, text: str) -> bool:
@@ -210,7 +227,7 @@ class LineService:
         return bubble
 
     @staticmethod
-    def build_auth_success_flex_bubble(company_name: str, role_name: str, user_id: str) -> Dict[str, Any]:
+    def build_auth_success_flex_bubble(company_name: str, role_name: str, user_id: str, max_count: int = 10) -> Dict[str, Any]:
         """
         建構授權綁定成功的歡迎 Flex 卡片
         """
@@ -247,7 +264,7 @@ class LineService:
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"歡迎您！您已獲取【{company_name}】之場站管理權限。每個管理者最高可自主挑選 10 座場站 加入個人監控：",
+                        "text": f"歡迎您！您已獲取【{company_name}】之場站管理權限。最高可自主挑選 {max_count} 座場站 加入個人監控：",
                         "size": "xs",
                         "color": "#334155",
                         "wrap": True
@@ -267,7 +284,7 @@ class LineService:
                             },
                             {
                                 "type": "text",
-                                "text": "1. 輸入 /可選場站 瀏覽可加入的名單\n2. 輸入 /新增 01 將代號 01 場站加入監控\n3. 輸入 /車位 01 5 30 調整車位警報標準\n4. 隨時輸入 /? 查看所有指令手冊",
+                                "text": "1. 輸入 /可選場站 瀏覽完整名單（可直接點擊右側「可新增」）\n2. 輸入 /車位 01 5 30 調整車位警報標準\n3. 隨時輸入 /? 查看完整指令手冊與自然語言範例",
                                 "size": "xs",
                                 "color": "#475569",
                                 "wrap": True,
@@ -299,6 +316,225 @@ class LineService:
         return bubble
 
     @staticmethod
+    def build_candidate_sites_flex_bubbles(
+        company_name: str,
+        candidates: List[Dict[str, Any]],
+        current_count: int,
+        max_count: int = 10,
+        chunk_size: int = 35
+    ) -> List[Dict[str, Any]]:
+        """
+        建構 /可選場站 完整上下捲動清單卡片組 (突破單張 30KB 限制，自動分段垂直堆疊並支援右側點擊新增/移除)
+        """
+        if not candidates:
+            return [{
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#0284C7",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "🏢 可選監控場站清單",
+                            "weight": "bold",
+                            "color": "#FFFFFF",
+                            "size": "lg"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"所屬企業: {company_name} ｜ 目前監控配額: {current_count} / {max_count} 場",
+                            "color": "#E0F2FE",
+                            "size": "xs",
+                            "margin": "xs",
+                            "weight": "bold"
+                        }
+                    ]
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "目前尚無可挑選的授權場站，請確認試算表場站設定或連線狀態。",
+                            "size": "xs",
+                            "color": "#64748B",
+                            "wrap": True
+                        }
+                    ]
+                }
+            }]
+
+        # 確保單次回覆最多 5 張卡片內可完整列出全部場站 (例如 98 場站分為 35+35+28 共 3 張垂直卡片)
+        total_items = len(candidates)
+        if total_items > chunk_size * 5:
+            chunk_size = (total_items + 4) // 5
+
+        chunks = [candidates[i:i + chunk_size] for i in range(0, total_items, chunk_size)][:5]
+        total_pages = len(chunks)
+        bubbles: List[Dict[str, Any]] = []
+
+        for page_idx, chunk in enumerate(chunks, start=1):
+            rows = []
+            first_code = chunk[0].get("station_code", "01")
+            last_code = chunk[-1].get("station_code", "01")
+
+            for c in chunk:
+                code = str(c.get("station_code", "00")).strip()
+                sname = str(c.get("station_name", "未知")).strip()
+                is_sub = bool(c.get("is_subscribed", False))
+
+                if is_sub:
+                    btn_label = "➖ 可移除"
+                    action_label = "可移除"
+                    action_text = f"/移除 {code}"
+                    pill_bg = "#FEF2F2"
+                    pill_color = "#DC2626"
+                else:
+                    btn_label = "➕ 可新增"
+                    action_label = "可新增"
+                    action_text = f"/新增 {code}"
+                    pill_bg = "#F0FDF4"
+                    pill_color = "#16A34A"
+
+                rows.append({
+                    "type": "box",
+                    "layout": "horizontal",
+                    "margin": "sm",
+                    "paddingAll": "6px",
+                    "backgroundColor": "#F8FAFC",
+                    "cornerRadius": "6px",
+                    "alignItems": "center",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"[{code}] {sname}",
+                            "size": "xs",
+                            "weight": "bold",
+                            "color": "#0F172A",
+                            "flex": 4,
+                            "wrap": True
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "flex": 2,
+                            "paddingAll": "4px",
+                            "backgroundColor": pill_bg,
+                            "cornerRadius": "6px",
+                            "justifyContent": "center",
+                            "alignItems": "center",
+                            "action": {
+                                "type": "message",
+                                "label": action_label,
+                                "text": action_text
+                            },
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": btn_label,
+                                    "size": "xxs",
+                                    "color": pill_color,
+                                    "weight": "bold",
+                                    "align": "center"
+                                }
+                            ]
+                        }
+                    ]
+                })
+
+            title_suffix = f" ({page_idx}/{total_pages})" if total_pages > 1 else ""
+            sub_info = (
+                f"企業: {company_name} ｜ 配額: {current_count}/{max_count} 場 ｜ 共 {total_items} 座 ([{first_code}]~[{last_code}])"
+                if total_pages > 1
+                else f"所屬企業: {company_name} ｜ 目前監控配額: {current_count} / {max_count} 場 (共 {total_items} 座)"
+            )
+
+            body_contents = []
+            if page_idx == 1:
+                body_contents.extend([
+                    {
+                        "type": "text",
+                        "text": "👆 直接點擊右側「➕ 可新增」或「➖ 可移除」即可當下加入或取消監控：",
+                        "size": "xs",
+                        "color": "#475569",
+                        "wrap": True
+                    },
+                    {"type": "separator", "margin": "sm"}
+                ])
+            body_contents.extend(rows)
+
+            bubble: Dict[str, Any] = {
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#0284C7",
+                    "paddingAll": "14px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"🏢 可選監控場站清單{title_suffix}",
+                            "weight": "bold",
+                            "color": "#FFFFFF",
+                            "size": "lg"
+                        },
+                        {
+                            "type": "text",
+                            "text": sub_info,
+                            "color": "#E0F2FE",
+                            "size": "xxs",
+                            "margin": "xs",
+                            "weight": "bold",
+                            "wrap": True
+                        }
+                    ]
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "12px",
+                    "contents": body_contents
+                }
+            }
+
+            if page_idx == total_pages:
+                bubble["footer"] = {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "xs",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "📋 查看我的監控清單",
+                                "text": "/查詢"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "💡 亦可直接輸入「/新增 代號」或「/移除 代號」操作",
+                            "size": "xxs",
+                            "color": "#64748B",
+                            "align": "center"
+                        }
+                    ]
+                }
+
+            bubbles.append(bubble)
+
+        return bubbles
+
+    @staticmethod
     def build_candidate_sites_flex_bubble(
         company_name: str,
         candidates: List[Dict[str, Any]],
@@ -306,117 +542,17 @@ class LineService:
         max_count: int = 10
     ) -> Dict[str, Any]:
         """
-        建構 /可選場站 清單卡片
+        向下相容單張呼叫介面 (回傳第一張候選場站卡片)
         """
-        rows = []
-        for c in candidates[:15]:  # 顯示前 15 場
-            code = c.get("station_code", "00")
-            sname = c.get("station_name", "未知")
-            is_sub = c.get("is_subscribed", False)
-
-            status_tag = "已監控" if is_sub else "可新增"
-            tag_color = "#94A3B8" if is_sub else "#16A34A"
-
-            rows.append({
-                "type": "box",
-                "layout": "horizontal",
-                "margin": "sm",
-                "paddingAll": "6px",
-                "backgroundColor": "#F8FAFC",
-                "cornerRadius": "4px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"[{code}] {sname}",
-                        "size": "xs",
-                        "weight": "bold",
-                        "color": "#0F172A",
-                        "flex": 4
-                    },
-                    {
-                        "type": "text",
-                        "text": status_tag,
-                        "size": "xxs",
-                        "color": tag_color,
-                        "weight": "bold",
-                        "align": "end",
-                        "flex": 1
-                    }
-                ]
-            })
-
-        if len(candidates) > 15:
-            rows.append({
-                "type": "text",
-                "text": f"（共可選 {len(candidates)} 座場站，顯示前 15 座。亦可直接輸入「/新增 場站名稱」加入其他場站）",
-                "size": "xxs",
-                "color": "#94A3B8",
-                "align": "center",
-                "margin": "md",
-                "wrap": True
-            })
-
-        bubble = {
-            "type": "bubble",
-            "size": "mega",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "backgroundColor": "#0284C7",
-                "paddingAll": "16px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "🏢 可選監控場站清單",
-                        "weight": "bold",
-                        "color": "#FFFFFF",
-                        "size": "lg"
-                    },
-                    {
-                        "type": "text",
-                        "text": f"所屬企業: {company_name} ｜ 目前監控配額: {current_count} / {max_count} 場",
-                        "color": "#E0F2FE",
-                        "size": "xs",
-                        "margin": "xs",
-                        "weight": "bold"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "paddingAll": "14px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"請挑選您要監控的場站代號，輸入「/新增 代號」即可完成綁定：",
-                        "size": "xs",
-                        "color": "#475569",
-                        "wrap": True
-                    },
-                    {"type": "separator", "margin": "sm"},
-                    *rows
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "paddingAll": "10px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "💡 範例：輸入「/新增 01」或「/移除 01」",
-                        "size": "xxs",
-                        "color": "#64748B",
-                        "align": "center"
-                    }
-                ]
-            }
-        }
-        return bubble
+        return LineService.build_candidate_sites_flex_bubbles(
+            company_name=company_name,
+            candidates=candidates,
+            current_count=current_count,
+            max_count=max_count
+        )[0]
 
     @staticmethod
-    def build_help_flex_bubble(user_id: str, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def build_help_flex_bubble(user_id: str, profile: Optional[Dict[str, Any]] = None, max_count: int = 10) -> Dict[str, Any]:
         """
         建構 /? 指令教學手冊 Flex Message 卡片 (依身分區分超級管理者與一般企業管理員)
         """
@@ -501,14 +637,14 @@ class LineService:
                             "contents": [
                                 {
                                     "type": "text",
-                                    "text": "2️⃣ 🏢 全台場站巡檢 (98+ 座場站)",
+                                    "text": f"2️⃣ 🏢 全台場站巡檢 (上限 {max_count} 場)",
                                     "weight": "bold",
                                     "size": "sm",
                                     "color": "#0F172A"
                                 },
                                 {
                                     "type": "text",
-                                    "text": "👉 /可選場站：列出全台所有候選場站\n👉 /新增 [代號或名稱]：加入個人自選監控\n👉 /移除 [代號或名稱]：取消監控 (釋出名額)\n👉 /查詢 或 /設定：查看自選監控與門檻\n👉 /車位 [場站] [下限] [上限]：車位雙向門檻\n   • 例：/車位 01 5 30 (低於5格或高於30格警報)\n   • 例：/車位 01 5 無 (僅設下限5格，上限不限)\n   • 例：/車位 01 無 50 (僅設上限50格，下限不限)\n   • 例：/車位 01 關閉 (停用該場車位警報)\n👉 /冷卻 [場站或全部] [車位|斷線] [時數]：防洗版間隔 (6/12/18/24/36h)",
+                                    "text": "👉 /可選場站：完整列出全台候選場站（可直接點擊右側「可新增 / 可移除」）\n👉 /新增 [代號或名稱]：加入個人自選監控\n👉 /移除 [代號或名稱]：取消監控 (釋出名額)\n👉 /查詢 或 /設定：查看自選監控與門檻\n👉 /車位 [場站] [下限] [上限]：車位雙向門檻\n   • 例：/車位 01 5 30 (低於5格或高於30格警報)\n   • 例：/車位 01 5 無 (僅設下限5格，上限不限)\n   • 例：/車位 01 無 50 (僅設上限50格，下限不限)\n   • 例：/車位 01 關閉 (停用該場車位警報)\n👉 /冷卻 [場站或全部] [車位|斷線] [時數]：防洗版間隔 (6/12/18/24/36h)",
                                     "size": "xs",
                                     "color": "#2563EB",
                                     "weight": "bold",
@@ -672,14 +808,14 @@ class LineService:
                         "contents": [
                             {
                                 "type": "text",
-                                "text": "1️⃣ 挑選與新增監控場站 (上限 10 場)",
+                                "text": f"1️⃣ 挑選與新增監控場站 (上限 {max_count} 場)",
                                 "weight": "bold",
                                 "size": "sm",
                                 "color": "#0F172A"
                             },
                             {
                                 "type": "text",
-                                "text": "👉 /可選場站：列出所有可加入的場站\n👉 /新增 [代號或名稱]：加入個人監控 (例：/新增 01)\n👉 /移除 [代號或名稱]：取消監控 (例：/移除 01)",
+                                "text": "👉 /可選場站：完整列出可加入場站（可直接點擊右側「可新增 / 可移除」）\n👉 /新增 [代號或名稱]：加入個人監控 (例：/新增 01)\n👉 /移除 [代號或名稱]：取消監控 (例：/移除 01)",
                                 "size": "xs",
                                 "color": "#2563EB",
                                 "weight": "bold",
@@ -712,7 +848,7 @@ class LineService:
                             },
                             {
                                 "type": "text",
-                                "text": "查看您正在監控的場站 (X/10 場) 與各場即時門檻。",
+                                "text": f"查看您正在監控的場站 (X/{max_count} 場) 與各場即時門檻。",
                                 "size": "xxs",
                                 "color": "#64748B",
                                 "wrap": True
@@ -866,50 +1002,112 @@ class LineService:
         return bubble
 
     @staticmethod
-    def build_query_settings_flex_bubble(company_name: str, settings: List[Dict[str, Any]], max_count: int = 10) -> Dict[str, Any]:
+    def build_query_settings_flex_bubbles(
+        company_name: str,
+        settings: List[Dict[str, Any]],
+        max_count: int = 10,
+        chunk_size: int = 15
+    ) -> List[Dict[str, Any]]:
         """
-        建構 /查詢 個人監控場站卡片 (上限 10 場)
+        建構 /查詢 個人監控場站卡片組 (支援超過 15 場自動垂直分段，且每座場站右側可直接點擊「➖ 可移除」)
         """
-        rows = []
         if not settings:
-            rows.append({
-                "type": "box",
-                "layout": "vertical",
-                "margin": "md",
-                "paddingAll": "12px",
-                "backgroundColor": "#F8FAFC",
-                "cornerRadius": "6px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "您目前尚未加入任何監控場站（最多可自選 10 座）。",
-                        "size": "xs",
-                        "color": "#64748B",
-                        "wrap": True
-                    },
-                    {
-                        "type": "button",
-                        "style": "primary",
-                        "color": "#0284C7",
-                        "height": "sm",
-                        "margin": "md",
-                        "action": {
-                            "type": "message",
-                            "label": "📋 查看可選場站清單",
-                            "text": "/可選場站"
+            return [{
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#0284C7",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "📋 我的個人監控場站清單",
+                            "weight": "bold",
+                            "color": "#FFFFFF",
+                            "size": "lg"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"🏢 企業: {company_name} ｜ 監控中: 0 / {max_count} 座場站",
+                            "color": "#E0F2FE",
+                            "size": "xs",
+                            "margin": "xs",
+                            "weight": "bold"
                         }
-                    }
-                ]
-            })
-        else:
-            for s in settings[:10]:
-                code = s.get("station_code") or ""
+                    ]
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "paddingAll": "12px",
+                            "backgroundColor": "#F8FAFC",
+                            "cornerRadius": "6px",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": f"您目前尚未加入任何監控場站（最高可自選 {max_count} 座）。",
+                                    "size": "xs",
+                                    "color": "#64748B",
+                                    "wrap": True
+                                },
+                                {
+                                    "type": "button",
+                                    "style": "primary",
+                                    "color": "#0284C7",
+                                    "height": "sm",
+                                    "margin": "md",
+                                    "action": {
+                                        "type": "message",
+                                        "label": "📋 查看可選場站清單",
+                                        "text": "/可選場站"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "💡 提示：輸入 /? 可隨時查看調整門檻與冷卻時數之指令。",
+                            "size": "xxs",
+                            "color": "#94A3B8",
+                            "align": "center"
+                        }
+                    ]
+                }
+            }]
+
+        total_items = len(settings)
+        if total_items > chunk_size * 5:
+            chunk_size = (total_items + 4) // 5
+
+        chunks = [settings[i:i + chunk_size] for i in range(0, total_items, chunk_size)][:5]
+        total_pages = len(chunks)
+        bubbles: List[Dict[str, Any]] = []
+
+        for page_idx, chunk in enumerate(chunks, start=1):
+            rows = []
+            for s in chunk:
+                code = str(s.get("station_code") or "").strip()
                 code_prefix = f"[{code}] " if code else ""
-                sname = s.get("station_name", "未知")
+                sname = str(s.get("station_name", "未知")).strip()
                 s_low = s.get("space_lower", "5")
                 s_up = s.get("space_upper", "無")
                 s_cool = s.get("space_cooldown", "6")
                 off_cool = s.get("offline_cooldown", "24")
+                rm_target = code if code else sname
 
                 rows.append({
                     "type": "box",
@@ -920,11 +1118,45 @@ class LineService:
                     "cornerRadius": "6px",
                     "contents": [
                         {
-                            "type": "text",
-                            "text": f"🅿️ {code_prefix}{sname}",
-                            "weight": "bold",
-                            "size": "sm",
-                            "color": "#0F172A"
+                            "type": "box",
+                            "layout": "horizontal",
+                            "alignItems": "center",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": f"🅿️ {code_prefix}{sname}",
+                                    "weight": "bold",
+                                    "size": "sm",
+                                    "color": "#0F172A",
+                                    "flex": 4,
+                                    "wrap": True
+                                },
+                                {
+                                    "type": "box",
+                                    "layout": "vertical",
+                                    "flex": 2,
+                                    "paddingAll": "4px",
+                                    "backgroundColor": "#FEF2F2",
+                                    "cornerRadius": "6px",
+                                    "justifyContent": "center",
+                                    "alignItems": "center",
+                                    "action": {
+                                        "type": "message",
+                                        "label": "可移除",
+                                        "text": f"/移除 {rm_target}"
+                                    },
+                                    "contents": [
+                                        {
+                                            "type": "text",
+                                            "text": "➖ 可移除",
+                                            "size": "xxs",
+                                            "color": "#DC2626",
+                                            "weight": "bold",
+                                            "align": "center"
+                                        }
+                                    ]
+                                }
+                            ]
                         },
                         {
                             "type": "box",
@@ -958,74 +1190,108 @@ class LineService:
                     ]
                 })
 
-        bubble = {
-            "type": "bubble",
-            "size": "mega",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "backgroundColor": "#0284C7",
-                "paddingAll": "16px",
-                "contents": [
+            title_suffix = f" ({page_idx}/{total_pages})" if total_pages > 1 else ""
+            body_contents = []
+            if page_idx == 1:
+                body_contents.extend([
                     {
                         "type": "text",
-                        "text": "📋 我的個人監控場站清單",
-                        "weight": "bold",
-                        "color": "#FFFFFF",
-                        "size": "lg"
-                    },
-                    {
-                        "type": "text",
-                        "text": f"🏢 企業: {company_name} ｜ 監控中: {len(settings)} / {max_count} 座場站",
-                        "color": "#E0F2FE",
-                        "size": "xs",
-                        "margin": "xs",
-                        "weight": "bold"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "paddingAll": "14px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"以下為您自選監控的場站與告警門檻 (上限 {max_count} 場)：",
+                        "text": f"以下為您自選監控的場站 (上限 {max_count} 場)，點擊右側「➖ 可移除」可當下取消監控：",
                         "size": "xs",
                         "color": "#64748B",
                         "wrap": True
                     },
-                    {"type": "separator", "margin": "sm"},
-                    *rows
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "paddingAll": "10px",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "💡 提示：輸入 /? 可隨時查看調整門檻與冷卻時數之指令。",
-                        "size": "xxs",
-                        "color": "#94A3B8",
-                        "align": "center"
-                    }
-                ]
+                    {"type": "separator", "margin": "sm"}
+                ])
+            body_contents.extend(rows)
+
+            bubble: Dict[str, Any] = {
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#0284C7",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"📋 我的個人監控場站清單{title_suffix}",
+                            "weight": "bold",
+                            "color": "#FFFFFF",
+                            "size": "lg"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"🏢 企業: {company_name} ｜ 監控中: {total_items} / {max_count} 座場站",
+                            "color": "#E0F2FE",
+                            "size": "xs",
+                            "margin": "xs",
+                            "weight": "bold"
+                        }
+                    ]
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "contents": body_contents
+                }
             }
-        }
-        return bubble
+
+            if page_idx == total_pages:
+                bubble["footer"] = {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "xs",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#0284C7",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "➕ 瀏覽可選場站清單",
+                                "text": "/可選場站"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "💡 提示：輸入 /? 可隨時查看調整門檻與冷卻時數之指令。",
+                            "size": "xxs",
+                            "color": "#94A3B8",
+                            "align": "center"
+                        }
+                    ]
+                }
+
+            bubbles.append(bubble)
+
+        return bubbles
+
+    @staticmethod
+    def build_query_settings_flex_bubble(company_name: str, settings: List[Dict[str, Any]], max_count: int = 10) -> Dict[str, Any]:
+        """
+        向下相容單張呼叫介面 (回傳第一張個人監控清單卡片)
+        """
+        return LineService.build_query_settings_flex_bubbles(
+            company_name=company_name,
+            settings=settings,
+            max_count=max_count
+        )[0]
 
     @staticmethod
     def build_command_result_flex_bubble(
         title: str,
         message: str,
         details: List[Dict[str, str]],
-        is_success: bool = True
+        is_success: bool = True,
+        footer_buttons: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
-        建構指令執行結果回饋卡片
+        建構指令執行結果回饋卡片 (支援自訂底部快捷按鈕)
         """
         header_color = "#16A34A" if is_success else "#DC2626"
         icon = "✅" if is_success else "❌"
@@ -1054,6 +1320,36 @@ class LineService:
                     }
                 ]
             })
+
+        if footer_buttons:
+            btn_contents = []
+            for b in footer_buttons:
+                btn_obj: Dict[str, Any] = {
+                    "type": "button",
+                    "style": b.get("style", "secondary"),
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": b.get("label", "查詢設定"),
+                        "text": b.get("text", "/查詢")
+                    }
+                }
+                if b.get("color"):
+                    btn_obj["color"] = b["color"]
+                btn_contents.append(btn_obj)
+        else:
+            btn_contents = [
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": "📋 查詢最新設定",
+                        "text": "/查詢"
+                    }
+                }
+            ]
 
         bubble = {
             "type": "bubble",
@@ -1092,19 +1388,9 @@ class LineService:
             "footer": {
                 "type": "box",
                 "layout": "vertical",
+                "spacing": "xs",
                 "paddingAll": "10px",
-                "contents": [
-                    {
-                        "type": "button",
-                        "style": "secondary",
-                        "height": "sm",
-                        "action": {
-                            "type": "message",
-                            "label": "📋 查詢最新設定",
-                            "text": "/查詢"
-                        }
-                    }
-                ]
+                "contents": btn_contents
             }
         }
         return bubble

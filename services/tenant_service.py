@@ -281,13 +281,32 @@ class TenantService:
         return None
 
     @staticmethod
+    def _resolve_max_stations(company_id: str, sheets_service: Any) -> int:
+        """
+        動態解析該企業身分之個人場站監控上限 (超級管理者 50 場，一般企業讀取系統全域參數)
+        """
+        if str(company_id).strip() in ["0", "ROOT"]:
+            return 50
+        if hasattr(sheets_service, "get_effective_max_stations"):
+            val = sheets_service.get_effective_max_stations(company_id)
+            if isinstance(val, int):
+                return val
+        try:
+            cfgs = sheets_service.fetch_system_configs()
+            if isinstance(cfgs, dict):
+                return int(cfgs.get("max_stations_per_user", 10))
+        except Exception:
+            pass
+        return 10
+
+    @staticmethod
     def parse_and_execute_command(
         user_id: str,
         text: str,
         sheets_service: Any
     ) -> Dict[str, Any]:
         """
-        解析並執行管理員指令 (支援初次企業授權碼綁定、10場限制、候選清單選取、自然語言)
+        解析並執行管理員指令 (支援初次企業授權碼綁定、動態場站上限、候選清單選取、自然語言)
         """
         raw_cmd = text.strip()
         permissions = sheets_service.fetch_tenant_permissions()
@@ -300,11 +319,14 @@ class TenantService:
             # 檢查是否輸入合法的企業授權碼
             bind_info = sheets_service.bind_user_to_company(user_id, raw_cmd)
             if bind_info:
+                bound_cid = str(bind_info.get("company_id", "1")).strip()
                 return {
                     "action": "auth_success",
+                    "company_id": bound_cid,
                     "company_name": bind_info["company_name"],
-                    "role_name": "管理員",
-                    "user_id": user_id
+                    "role_name": "系統超級管理者" if bound_cid in ["0", "ROOT"] else "管理員",
+                    "user_id": user_id,
+                    "max_count": TenantService._resolve_max_stations(bound_cid, sheets_service)
                 }
             else:
                 return {
@@ -314,13 +336,16 @@ class TenantService:
                 }
 
         # ----------------------------------------------------
-        # 2. 已綁定身份的使用者
+        # 2. 已綁定身份的使用者 (正規化全形符號與斜線後空白，如 ／？、/ ? -> /?)
         # ----------------------------------------------------
         company_id = profile["company_id"]
         company_name = profile["company_name"]
+        norm_cmd = raw_cmd.replace("／", "/").replace("？", "?").replace("　", " ").strip()
+        if norm_cmd.startswith("/"):
+            norm_cmd = "/" + norm_cmd[1:].lstrip()
 
         # (0) 重新綁定企業授權碼 /重新綁定 (方式 A 主動求助式)
-        if raw_cmd in ["/重新綁定", "重新綁定", "/切換身分", "切換身分", "/重新輸入", "重新輸入", "/換企業", "/rebind"]:
+        if norm_cmd in ["/重新綁定", "重新綁定", "/切換身分", "切換身分", "/重新輸入", "重新輸入", "/換企業", "/rebind"]:
             sheets_service.unbind_user(user_id)
             return {
                 "action": "auth_required",
@@ -329,15 +354,16 @@ class TenantService:
             }
 
         # (1) 教學手冊 /?
-        if raw_cmd in ["/?", "/help", "help", "?", "說明", "功能"]:
+        if norm_cmd in ["/?", "/help", "help", "?", "說明", "功能"]:
             return {
                 "action": "help",
                 "profile": profile,
-                "user_id": user_id
+                "user_id": user_id,
+                "max_count": TenantService._resolve_max_stations(company_id, sheets_service)
             }
 
         # (2) 列出可選候選場站 /可選場站
-        if raw_cmd in ["/可選場站", "可選場站", "/場站列表", "場站列表", "/候選場站", "有哪些場站可以選", "選場站", "/sites"]:
+        if norm_cmd in ["/可選場站", "可選場站", "/場站列表", "場站列表", "/候選場站", "有哪些場站可以選", "選場站", "/sites"]:
             candidates = sheets_service.fetch_candidate_sites(company_id, user_id)
             current_subs = sheets_service.fetch_user_subscriptions(user_id)
             return {
@@ -345,18 +371,18 @@ class TenantService:
                 "company_name": company_name,
                 "candidates": candidates,
                 "current_count": len(current_subs),
-                "max_count": 10
+                "max_count": TenantService._resolve_max_stations(company_id, sheets_service)
             }
 
         # (3) 新增場站至個人監控 /新增 [代號或名稱]
-        if raw_cmd.startswith("/新增") or raw_cmd.startswith("新增") or raw_cmd.startswith("/加入") or raw_cmd.startswith("加入"):
-            parts = re.split(r"\s+", raw_cmd)
-            if len(parts) < 2:
+        if norm_cmd.startswith("/新增") or norm_cmd.startswith("新增") or norm_cmd.startswith("/加入") or norm_cmd.startswith("加入"):
+            parts = re.split(r"\s+", norm_cmd, maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
                 return {
                     "action": "error",
                     "error": "請指定要新增的場站代號或名稱！\n例如：/新增 01 或 /新增 松山撫遠場"
                 }
-            query_arg = parts[1]
+            query_arg = parts[1].strip()
             res = sheets_service.add_user_subscription(user_id, company_id, query_arg)
             return {
                 "action": "add_subscription",
@@ -365,15 +391,15 @@ class TenantService:
             }
 
         # (4) 移除個人監控場站 /移除 [代號或名稱]
-        if raw_cmd.startswith("/移除") or raw_cmd.startswith("移除") or raw_cmd.startswith("/刪除") or raw_cmd.startswith("刪除"):
-            parts = re.split(r"\s+", raw_cmd)
-            if len(parts) < 2:
+        if norm_cmd.startswith("/移除") or norm_cmd.startswith("移除") or norm_cmd.startswith("/刪除") or norm_cmd.startswith("刪除"):
+            parts = re.split(r"\s+", norm_cmd, maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
                 return {
                     "action": "error",
                     "error": "請指定要移除的場站代號或名稱！\n例如：/移除 01 或 /移除 撫遠"
                 }
-            query_arg = parts[1]
-            res = sheets_service.remove_user_subscription(user_id, query_arg)
+            query_arg = parts[1].strip()
+            res = sheets_service.remove_user_subscription(user_id, query_arg, company_id=company_id)
             return {
                 "action": "remove_subscription",
                 "company_name": company_name,
@@ -381,19 +407,19 @@ class TenantService:
             }
 
         # (5) 查詢個人監控場站 /查詢 或 /設定
-        if raw_cmd in ["/查詢", "查詢", "/設定", "設定", "/list", "我的場站", "/我的場站"]:
+        if norm_cmd in ["/查詢", "查詢", "/設定", "設定", "/list", "我的場站", "/我的場站"]:
             subs = sheets_service.fetch_user_subscriptions(user_id)
             return {
                 "action": "query",
                 "company_name": company_name,
                 "company_id": company_id,
                 "settings": subs,
-                "max_count": 10
+                "max_count": TenantService._resolve_max_stations(company_id, sheets_service)
             }
 
         # (6) 車位設定指令 /車位 [代號或場站] [下限] [上限]
-        if raw_cmd.startswith("/車位") or raw_cmd.startswith("車位"):
-            parts = re.split(r"\s+", raw_cmd)
+        if norm_cmd.startswith("/車位") or norm_cmd.startswith("車位"):
+            parts = re.split(r"\s+", norm_cmd)
             if len(parts) < 3:
                 return {
                     "action": "error",
@@ -421,8 +447,8 @@ class TenantService:
             }
 
         # (7) 冷卻設定指令 /冷卻 [代號或全部] [車位|斷線] [6|12|18|24|36]
-        if raw_cmd.startswith("/冷卻") or raw_cmd.startswith("冷卻"):
-            parts = re.split(r"\s+", raw_cmd)
+        if norm_cmd.startswith("/冷卻") or norm_cmd.startswith("冷卻"):
+            parts = re.split(r"\s+", norm_cmd)
             if len(parts) < 4:
                 return {
                     "action": "error",
@@ -467,7 +493,7 @@ class TenantService:
         # (8) 超級管理者專屬控制指令: /靜音、/解除靜音、/參數
         is_super = (str(company_id).strip() in ["0", "ROOT"])
 
-        if raw_cmd in ["/靜音", "靜音", "/全系統靜音", "全系統靜音", "/mute"]:
+        if norm_cmd in ["/靜音", "靜音", "/全系統靜音", "全系統靜音", "/mute"]:
             if not is_super:
                 return {
                     "action": "error",
@@ -479,7 +505,7 @@ class TenantService:
                 "message": "🔕 全系統靜音已啟動！\n系統已暫停所有場站的 LINE 異常警報推播（包含車位與斷線），以防超支或額度耗盡。\n\n如需恢復推播，請輸入「/解除靜音」。"
             }
 
-        if raw_cmd in ["/解除靜音", "解除靜音", "/恢復通知", "恢復通知", "/unmute"]:
+        if norm_cmd in ["/解除靜音", "解除靜音", "/恢復通知", "恢復通知", "/unmute"]:
             if not is_super:
                 return {
                     "action": "error",
@@ -491,13 +517,13 @@ class TenantService:
                 "message": "🔔 全系統靜音已解除！\n系統已恢復常態異常巡檢與推播發送。"
             }
 
-        if raw_cmd.startswith("/參數") or raw_cmd.startswith("參數") or raw_cmd.startswith("/config"):
+        if norm_cmd.startswith("/參數") or norm_cmd.startswith("參數") or norm_cmd.startswith("/config"):
             if not is_super:
                 return {
                     "action": "error",
                     "error": "⛔ 權限不足：僅有超級管理者 (企業代號 0) 可以檢視或修改系統全域參數！"
                 }
-            parts = re.split(r"\s+", raw_cmd)
+            parts = re.split(r"\s+", norm_cmd)
             if len(parts) == 1:
                 configs = sheets_service.fetch_system_configs()
                 return {
@@ -560,13 +586,14 @@ class TenantService:
         user_subs = sheets_service.fetch_user_subscriptions(user_id)
         user_station_names = [s.get("station_name") for s in user_subs if s.get("station_name")]
 
-        nlp_res = NLPService.understand_user_message(raw_cmd, allowed_stations=user_station_names)
+        nlp_res = NLPService.understand_user_message(norm_cmd, allowed_stations=user_station_names)
         intent = nlp_res.get("intent")
+        eff_max = TenantService._resolve_max_stations(company_id, sheets_service)
 
         if intent == "help":
-            return {"action": "help", "profile": profile, "user_id": user_id}
+            return {"action": "help", "profile": profile, "user_id": user_id, "max_count": eff_max}
         elif intent == "query":
-            return {"action": "query", "company_name": company_name, "company_id": company_id, "settings": user_subs, "max_count": 10}
+            return {"action": "query", "company_name": company_name, "company_id": company_id, "settings": user_subs, "max_count": eff_max}
         elif intent == "set_space":
             stn = nlp_res.get("station_name")
             low = nlp_res.get("lower", "無")
@@ -590,11 +617,12 @@ class TenantService:
             )
             return {"action": "cooldown_update", "company_name": company_name, "result": res, "is_nlp": True}
 
-        # (9) 未知口語引導
+        # (10) 未知口語引導
         return {
             "action": "unknown",
             "user_id": user_id,
             "profile": profile,
             "text": text,
-            "sub_count": len(user_subs)
+            "sub_count": len(user_subs),
+            "max_count": eff_max
         }

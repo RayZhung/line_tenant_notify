@@ -546,9 +546,21 @@ class SheetsService:
             logger.error(f"Error fetching candidate sites: {e}")
             return []
 
+    def get_effective_max_stations(self, company_id: str) -> int:
+        """
+        取得該企業身分對應的最大可監控場站上限 (超級管理者 50 座，一般管理員依全域參數)
+        """
+        if str(company_id).strip() in ["0", "ROOT"]:
+            return 50
+        configs = self.fetch_system_configs()
+        try:
+            return int(configs.get("max_stations_per_user", 10))
+        except (ValueError, TypeError):
+            return 10
+
     def fetch_user_subscriptions(self, line_user_id: str) -> List[Dict[str, Any]]:
         """
-        讀取該使用者在「個人監控場站表」中自選的場站 (最多 10 場)
+        讀取該使用者在「個人監控場站表」中自選的場站
         """
         if not self.client or not self.spreadsheet_id:
             return []
@@ -562,6 +574,9 @@ class SheetsService:
             clean_uid = str(line_user_id).strip()
             for r in clean_records:
                 if str(r.get("line_user_id", "")).strip() == clean_uid:
+                    raw_c = str(r.get("station_code", "")).strip()
+                    if raw_c.isdigit():
+                        r["station_code"] = f"{int(raw_c):02d}"
                     user_subs.append(r)
             return user_subs
         except Exception as e:
@@ -580,21 +595,14 @@ class SheetsService:
         clean_uid = str(line_user_id).strip()
         current_subs = self.fetch_user_subscriptions(clean_uid)
 
-        # 1. 取得全域上限 (由 Google 試算表決定，預設 10)
+        # 1. 取得全域上限與預設值
         configs = self.fetch_system_configs()
-        try:
-            max_limit = int(configs.get("max_stations_per_user", 10))
-        except (ValueError, TypeError):
-            max_limit = 10
-
-        # 超級管理者 (company_id == '0') 可不受 10 場限制，或享有更高上限
-        is_super = (str(company_id).strip() in ["0", "ROOT"])
-        effective_max = 50 if is_super else max_limit
+        effective_max = self.get_effective_max_stations(company_id)
 
         if len(current_subs) >= effective_max:
             return {
                 "success": False,
-                "error": f"您目前已監控 {len(current_subs)} 座場站（已達上限 {effective_max} 座），請先輸入 /移除 移除不需要的場站後再新增。"
+                "error": f"您目前已監控 {len(current_subs)} 座場站（已達上限 {effective_max} 座），請先移除不需要的場站後再新增。"
             }
 
         # 2. 搜尋候選場站
@@ -606,9 +614,14 @@ class SheetsService:
         q_code = f"{int(q):02d}" if q.isdigit() else q
 
         for c in candidates:
-            if c["station_code"] == q_code or q in c["station_name"].lower():
+            if c["station_code"] == q_code or c["station_name"].lower() == q:
                 matched = c
                 break
+        if not matched and not q.isdigit():
+            for c in candidates:
+                if q in c["station_name"].lower():
+                    matched = c
+                    break
 
         if not matched:
             return {
@@ -631,34 +644,41 @@ class SheetsService:
             ws = sh.worksheet(self.sheet_name_user_subs)
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+            def_low = str(configs.get("default_space_lower", "5"))
+            def_s_cool = str(configs.get("default_space_cooldown", "6"))
+            def_o_cool = str(configs.get("default_offline_cooldown", "24"))
+
             new_row = [
                 clean_uid,
                 str(company_id),
                 matched["station_code"],
                 matched["station_name"],
                 matched["station_ip"],
-                "5",   # space_lower default
-                "無",  # space_upper default
-                "6",   # space_cooldown default
-                "24",  # offline_cooldown default
+                def_low,     # space_lower default
+                "無",        # space_upper default
+                def_s_cool,  # space_cooldown default
+                def_o_cool,  # offline_cooldown default
                 now_str
             ]
-            ws.append_row(new_row)
+            ws.append_row(new_row, value_input_option="RAW")
             new_count = len(current_subs) + 1
-            logger.info(f"Added subscription for user {clean_uid}: {matched['station_name']} (Total: {new_count}/10)")
+            logger.info(f"Added subscription for user {clean_uid}: {matched['station_name']} (Total: {new_count}/{effective_max})")
             return {
                 "success": True,
                 "station_name": matched["station_name"],
                 "station_code": matched["station_code"],
                 "station_ip": matched["station_ip"],
                 "current_count": new_count,
-                "max_count": effective_max
+                "max_count": effective_max,
+                "default_lower": def_low,
+                "default_space_cooldown": def_s_cool,
+                "default_offline_cooldown": def_o_cool
             }
         except Exception as e:
             logger.error(f"Error adding user subscription: {e}")
             return {"success": False, "error": str(e)}
 
-    def remove_user_subscription(self, line_user_id: str, station_query: str) -> Dict[str, Any]:
+    def remove_user_subscription(self, line_user_id: str, station_query: str, company_id: str = "1") -> Dict[str, Any]:
         """
         管理者移除個人監控場站
         """
@@ -684,13 +704,23 @@ class SheetsService:
             target_row_idx = None
             removed_name = ""
 
+            user_rows = []
             for idx, row in enumerate(all_values[1:], start=2):
                 r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                r_code = str(row[col_code] if col_code < len(row) else "").strip()
-                r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
-
                 if r_uid == clean_uid:
-                    if r_code == q_code or q in r_stn.lower():
+                    r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                    r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                    r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                    user_rows.append((idx, r_code, r_stn))
+
+            for idx, r_code, r_stn in user_rows:
+                if r_code == q_code or r_stn.lower() == q:
+                    target_row_idx = idx
+                    removed_name = r_stn
+                    break
+            if not target_row_idx and not q.isdigit():
+                for idx, r_code, r_stn in user_rows:
+                    if q in r_stn.lower():
                         target_row_idx = idx
                         removed_name = r_stn
                         break
@@ -703,11 +733,12 @@ class SheetsService:
 
             ws.delete_rows(target_row_idx)
             current_subs = self.fetch_user_subscriptions(clean_uid)
+            effective_max = self.get_effective_max_stations(company_id)
             return {
                 "success": True,
                 "station_name": removed_name,
                 "remaining_count": len(current_subs),
-                "max_count": 10
+                "max_count": effective_max
             }
         except Exception as e:
             logger.error(f"Error removing user subscription: {e}")
@@ -749,15 +780,26 @@ class SheetsService:
             target_row_idx = None
             matched_name = ""
 
+            user_rows = []
             for idx, row in enumerate(all_values[1:], start=2):
                 r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                r_code = str(row[col_code] if col_code < len(row) else "").strip()
-                r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                if r_uid == clean_uid:
+                    r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                    r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                    r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                    user_rows.append((idx, r_code, r_stn))
 
-                if r_uid == clean_uid and (r_code == q_code or q in r_stn.lower()):
+            for idx, r_code, r_stn in user_rows:
+                if r_code == q_code or r_stn.lower() == q:
                     target_row_idx = idx
                     matched_name = r_stn
                     break
+            if not target_row_idx and not q.isdigit():
+                for idx, r_code, r_stn in user_rows:
+                    if q in r_stn.lower():
+                        target_row_idx = idx
+                        matched_name = r_stn
+                        break
 
             if not target_row_idx:
                 return {
@@ -823,7 +865,8 @@ class SheetsService:
 
             for idx, row in enumerate(all_values[1:], start=2):
                 r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                r_code = str(row[col_code] if col_code < len(row) else "").strip()
+                r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
                 r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
 
                 if r_uid == clean_uid:

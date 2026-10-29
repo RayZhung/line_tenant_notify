@@ -83,48 +83,62 @@ if line_service.handler:
                 bubble = line_service.build_auth_success_flex_bubble(
                     cmd_res["company_name"], 
                     cmd_res.get("role_name", "管理員"), 
-                    user_id
+                    user_id,
+                    max_count=cmd_res.get("max_count", 10)
                 )
                 line_service.reply_flex(reply_token, bubble, alt_text="🎉 企業身份綁定成功！")
 
-            # 3. 列出可選候選場站 /可選場站
+            # 3. 列出可選候選場站 /可選場站 (完整垂直分段列表 + 右側點擊新增/移除)
             elif action == "list_candidates":
-                bubble = line_service.build_candidate_sites_flex_bubble(
+                bubbles = line_service.build_candidate_sites_flex_bubbles(
                     company_name=cmd_res["company_name"],
                     candidates=cmd_res.get("candidates", []),
                     current_count=cmd_res.get("current_count", 0),
                     max_count=cmd_res.get("max_count", 10)
                 )
-                line_service.reply_flex(reply_token, bubble, alt_text="🏢 可選監控場站清單")
+                line_service.reply_flex_list(reply_token, bubbles, alt_text="🏢 可選監控場站清單")
 
             # 4. 新增場站至個人監控 /新增
             elif action == "add_subscription":
                 r = cmd_res.get("result", {})
+                quick_nav_buttons = [
+                    {"label": "🔄 返回可選場站清單", "text": "/可選場站", "style": "primary", "color": "#0284C7"},
+                    {"label": "📋 查看我的監控清單", "text": "/查詢", "style": "secondary"}
+                ]
                 if r.get("success"):
+                    def_low = r.get("default_lower", "5")
+                    def_sc = r.get("default_space_cooldown", "6")
+                    def_oc = r.get("default_offline_cooldown", "24")
                     details = [
                         {"label": "新增場站", "value": f"[{r.get('station_code')}] {r.get('station_name')}"},
                         {"label": "目前監控配額", "value": f"{r.get('current_count')} / {r.get('max_count')} 座場站"},
-                        {"label": "預設車位門檻", "value": "< 5 格"},
-                        {"label": "預設冷卻時間", "value": "車位 6h / 斷線 24h"}
+                        {"label": "預設車位門檻", "value": f"< {def_low} 格"},
+                        {"label": "預設冷卻時間", "value": f"車位 {def_sc}h / 斷線 {def_oc}h"}
                     ]
                     bubble = line_service.build_command_result_flex_bubble(
                         "場站加入監控成功",
                         f"已成功將 [{r.get('station_code')}] {r.get('station_name')} 加入您的個人監控清單。",
                         details,
-                        is_success=True
+                        is_success=True,
+                        footer_buttons=quick_nav_buttons
                     )
                 else:
                     bubble = line_service.build_command_result_flex_bubble(
                         "無法加入監控",
                         r.get("error", "未知錯誤"),
                         [],
-                        is_success=False
+                        is_success=False,
+                        footer_buttons=quick_nav_buttons
                     )
                 line_service.reply_flex(reply_token, bubble, alt_text="新增監控結果")
 
             # 5. 移除個人監控場站 /移除
             elif action == "remove_subscription":
                 r = cmd_res.get("result", {})
+                quick_nav_buttons = [
+                    {"label": "🔄 返回可選場站清單", "text": "/可選場站", "style": "primary", "color": "#0284C7"},
+                    {"label": "📋 查看我的監控清單", "text": "/查詢", "style": "secondary"}
+                ]
                 if r.get("success"):
                     details = [
                         {"label": "移除場站", "value": r.get("station_name", "")},
@@ -132,32 +146,38 @@ if line_service.handler:
                     ]
                     bubble = line_service.build_command_result_flex_bubble(
                         "已移除監控場站",
-                        "已為您釋出配額名額，可輸入 /可選場站 挑選其他場站加入監控。",
+                        "已為您釋出配額名額，可點擊下方按鈕返回場站清單繼續挑選。",
                         details,
-                        is_success=True
+                        is_success=True,
+                        footer_buttons=quick_nav_buttons
                     )
                 else:
                     bubble = line_service.build_command_result_flex_bubble(
                         "移除失敗",
                         r.get("error", "未知錯誤"),
                         [],
-                        is_success=False
+                        is_success=False,
+                        footer_buttons=quick_nav_buttons
                     )
                 line_service.reply_flex(reply_token, bubble, alt_text="移除監控結果")
 
             # 6. 教學手冊 /?
             elif action == "help":
-                bubble = line_service.build_help_flex_bubble(user_id, cmd_res.get("profile"))
+                bubble = line_service.build_help_flex_bubble(
+                    user_id,
+                    cmd_res.get("profile"),
+                    max_count=cmd_res.get("max_count", 10)
+                )
                 line_service.reply_flex(reply_token, bubble, alt_text="📖 管理員指令教學手冊")
 
             # 7. 查詢個人監控場站 /查詢
             elif action == "query":
-                bubble = line_service.build_query_settings_flex_bubble(
+                bubbles = line_service.build_query_settings_flex_bubbles(
                     cmd_res["company_name"], 
                     cmd_res.get("settings", []),
                     max_count=cmd_res.get("max_count", 10)
                 )
-                line_service.reply_flex(reply_token, bubble, alt_text="📋 我的個人監控場站清單")
+                line_service.reply_flex_list(reply_token, bubbles, alt_text="📋 我的個人監控場站清單")
 
             # 8. 車位門檻設定 /車位
             elif action == "space_update":
@@ -240,19 +260,29 @@ if line_service.handler:
                 profile = cmd_res.get("profile")
                 cname = profile.get("company_name", "微程式") if profile else "微程式"
                 role = profile.get("role_name", "管理員") if profile else "管理員"
+                cid = str(profile.get("company_id", "")).strip() if profile else ""
+                is_super = (cid in ["0", "ROOT"] or "超級" in role or "超級" in cname)
                 sub_cnt = cmd_res.get("sub_count", 0)
+                max_cnt = cmd_res.get("max_count", 50 if is_super else 10)
+
+                super_hint = (
+                    "👑 超級管理者專屬指令：\n"
+                    "• /參數 (開啟全域參數控制台)\n"
+                    "• /靜音 ｜ /解除靜音 (全系統推播開關)\n\n"
+                ) if is_super else ""
+
                 line_service.reply_text(
                     reply_token,
                     f"👋 您好！我是「場站監控中心機器人」。\n\n"
                     f"🏢 身份：{cname} ({role})\n"
-                    f"📊 目前個人監控：{sub_cnt} / 10 座場站\n\n"
+                    f"📊 目前個人監控：{sub_cnt} / {max_cnt} 座場站\n\n"
+                    f"{super_hint}"
                     f"🤖 常用指令：\n"
-                    f"• /可選場站 (瀏覽可加入的名單)\n"
-                    f"• /新增 [代號] (加入個人監控，例：/新增 01)\n"
-                    f"• /移除 [代號] (取消監控)\n"
+                    f"• /可選場站 (完整列出名單，可點擊右側新增/移除)\n"
                     f"• /查詢 (查看我的監控與門檻)\n"
+                    f"• /車位 [代號] [下限] [上限] (設定車位警報)\n"
                     f"• 亦可直接說「撫遠場車位少於5個時警報」\n\n"
-                    f"💡 輸入「/?」即可開啟詳細指令手冊！"
+                    f"💡 輸入「/?」即可開啟專屬詳細指令手冊！"
                 )
     except Exception as e:
         logger.error(f"Failed to bind custom LINE message handler: {e}")
