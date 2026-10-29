@@ -815,7 +815,7 @@ class LineService:
                             },
                             {
                                 "type": "text",
-                                "text": "👉 /可選場站：完整列出可加入場站（可直接點擊右側「可新增 / 可移除」）\n👉 /新增 [代號或名稱]：加入個人監控 (例：/新增 01)\n👉 /移除 [代號或名稱]：取消監控 (例：/移除 01)",
+                                "text": "👉 /可選場站：完整列出可加入場站（可直接點擊右側「可新增 / 可移除」）\n👉 /新增 [代號或名稱]：加入個人監控 (支援多站，例：/新增 01 02)\n👉 /移除 [代號或名稱]：取消監控 (例：/移除 01)\n💬 亦可直接說：「幫我把前金成功場跟青埔二場列入監控」",
                                 "size": "xs",
                                 "color": "#2563EB",
                                 "weight": "bold",
@@ -1308,7 +1308,8 @@ class LineService:
                         "text": d.get("label", ""),
                         "size": "xs",
                         "color": "#64748B",
-                        "flex": 2
+                        "flex": 2,
+                        "wrap": True
                     },
                     {
                         "type": "text",
@@ -1316,7 +1317,8 @@ class LineService:
                         "size": "xs",
                         "weight": "bold",
                         "color": "#0F172A",
-                        "flex": 3
+                        "flex": 3,
+                        "wrap": True
                     }
                 ]
             })

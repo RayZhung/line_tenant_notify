@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
-from services.nlp_service import NLPService
+from services.nlp_service import NLPService, extract_stations
 
 logger = logging.getLogger("tenant_service")
 
@@ -441,6 +441,191 @@ class TenantService:
         return 10
 
     @staticmethod
+    def _split_raw_station_tokens(raw_arg: str) -> List[str]:
+        """將空白、頓號、逗號或連接詞分隔的多場站參數拆解為獨立查詢詞"""
+        cleaned = re.sub(r"\[(\d{1,3})\]", r" \1 ", raw_arg)
+        tokens = [
+            t.strip()
+            for t in re.split(r"[\s,，、;；]+|(?:以及|還有|跟|和|與|及)", cleaned)
+            if t and t.strip()
+        ]
+        dedup: List[str] = []
+        for t in tokens:
+            if t not in dedup:
+                dedup.append(t)
+        return dedup
+
+    @staticmethod
+    def _execute_batch_add_and_configure(
+        user_id: str,
+        company_id: str,
+        company_name: str,
+        stations: List[str],
+        sheets_service: Any,
+        space_cfg: Optional[Dict[str, str]] = None,
+        cool_cfg: Optional[Dict[str, Any]] = None,
+        auto_add: bool = True
+    ) -> Dict[str, Any]:
+        """
+        執行多場站批次新增與複合門檻/冷卻設定，彙整為單一結果結構
+        """
+        existing_subs = sheets_service.fetch_user_subscriptions(user_id)
+        existing_names = {str(s.get("station_name", "")).strip() for s in existing_subs}
+
+        added: List[str] = []
+        already_monitored: List[str] = []
+        ready_for_cfg: List[str] = []
+        failed: List[str] = []
+
+        for stn in stations:
+            if stn in existing_names:
+                already_monitored.append(stn)
+                ready_for_cfg.append(stn)
+                continue
+
+            if not auto_add:
+                failed.append(f"{stn}（尚未加入監控）")
+                continue
+
+            r = sheets_service.add_user_subscription(user_id, company_id, stn)
+            if r.get("success"):
+                s_code = r.get("station_code")
+                s_name = r.get("station_name", stn)
+                added.append(f"[{s_code}] {s_name}" if s_code else s_name)
+                existing_names.add(s_name)
+                ready_for_cfg.append(s_name)
+            else:
+                err_txt = str(r.get("error", "新增失敗"))
+                if "已在您的監控清單中" in err_txt:
+                    already_monitored.append(stn)
+                    ready_for_cfg.append(stn)
+                else:
+                    failed.append(f"{stn}：{err_txt}")
+
+        space_applied: List[str] = []
+        if space_cfg and ready_for_cfg:
+            low = space_cfg.get("lower", "無")
+            up = space_cfg.get("upper", "無")
+            for target_s in ready_for_cfg:
+                sr = sheets_service.update_user_station_space(
+                    line_user_id=user_id,
+                    station_query=target_s,
+                    lower=low,
+                    upper=up,
+                )
+                if sr.get("success"):
+                    space_applied.append(sr.get("station_name", target_s))
+
+        cool_applied: List[str] = []
+        if cool_cfg and ready_for_cfg:
+            atype = cool_cfg.get("alert_type", "車位")
+            hrs = int(cool_cfg.get("cooldown_hours", 12))
+            for target_s in ready_for_cfg:
+                cr = sheets_service.update_user_station_cooldown(
+                    line_user_id=user_id,
+                    station_query=target_s,
+                    alert_type=atype,
+                    hours=hrs,
+                )
+                if cr.get("success"):
+                    cool_applied.append(target_s)
+
+        final_subs = sheets_service.fetch_user_subscriptions(user_id)
+        eff_max = TenantService._resolve_max_stations(company_id, sheets_service)
+
+        details: List[Dict[str, str]] = []
+        if added:
+            details.append({"label": "新增監控", "value": "、".join(added)})
+        if already_monitored and (not space_cfg and not cool_cfg or added):
+            details.append({"label": "原本已監控", "value": "、".join(already_monitored)})
+        if space_applied and space_cfg:
+            low_v = space_cfg.get("lower", "無")
+            up_v = space_cfg.get("upper", "無")
+            low_str = f"< {low_v} 格" if low_v != "無" else "不設下限"
+            up_str = f" / > {up_v} 格" if up_v != "無" else ""
+            details.append({"label": "車位門檻", "value": f"{low_str}{up_str}（共 {len(space_applied)} 站）"})
+        if cool_applied and cool_cfg:
+            details.append({
+                "label": "冷卻間隔",
+                "value": f"{cool_cfg.get('alert_type', '車位')} {cool_cfg.get('cooldown_hours', 12)}h（共 {len(cool_applied)} 站）",
+            })
+        if failed:
+            details.append({"label": "未完成項目", "value": "；".join(failed)})
+        details.append({"label": "目前監控配額", "value": f"{len(final_subs)} / {eff_max} 座場站"})
+
+        is_success = bool(added or space_applied or cool_applied)
+        if added and (space_applied or cool_applied):
+            title = "場站加入監控與門檻設定成功"
+            msg = f"已自動將場站加入個人監控並完成警報參數設定。"
+        elif added:
+            title = "多場站批次加入監控成功"
+            msg = f"已成功將 {len(added)} 座場站加入您的個人監控清單。"
+        elif space_applied or cool_applied:
+            title = "多場站警報設定更新成功"
+            msg = f"已更新您指定場站的個人化警報設定。"
+        else:
+            title = "無法加入或更新監控場站"
+            msg = failed[0] if failed else "找不到相符的可選場站或配額已滿。"
+
+        return {
+            "action": "batch_operation",
+            "company_name": company_name,
+            "is_success": is_success,
+            "title": title,
+            "message": msg,
+            "details": details,
+            "added_count": len(added),
+            "current_count": len(final_subs),
+            "max_count": eff_max,
+        }
+
+    @staticmethod
+    def _execute_batch_remove(
+        user_id: str,
+        company_id: str,
+        company_name: str,
+        stations: List[str],
+        sheets_service: Any
+    ) -> Dict[str, Any]:
+        """執行多場站批次移除監控"""
+        removed: List[str] = []
+        failed: List[str] = []
+
+        for stn in stations:
+            r = sheets_service.remove_user_subscription(user_id, stn, company_id=company_id)
+            if r.get("success"):
+                removed.append(r.get("station_name", stn))
+            else:
+                failed.append(f"{stn}（{r.get('error', '未在監控中')}）")
+
+        final_subs = sheets_service.fetch_user_subscriptions(user_id)
+        eff_max = TenantService._resolve_max_stations(company_id, sheets_service)
+
+        details: List[Dict[str, str]] = []
+        if removed:
+            details.append({"label": "已移除場站", "value": "、".join(removed)})
+        if failed:
+            details.append({"label": "未移除項目", "value": "；".join(failed)})
+        details.append({"label": "剩餘監控數", "value": f"{len(final_subs)} / {eff_max} 座場站"})
+
+        is_success = bool(removed)
+        return {
+            "action": "batch_operation",
+            "company_name": company_name,
+            "is_success": is_success,
+            "title": "多場站移除監控成功" if is_success else "移除監控失敗",
+            "message": (
+                f"已成功移除 {len(removed)} 座監控場站並釋出配額。"
+                if is_success
+                else (failed[0] if failed else "在您的監控清單中找不到指定場站。")
+            ),
+            "details": details,
+            "removed_count": len(removed),
+            "current_count": len(final_subs),
+            "max_count": eff_max,
+        }
+
+    @staticmethod
     def parse_and_execute_command(
         user_id: str,
         text: str,
@@ -527,37 +712,69 @@ class TenantService:
                 "max_count": TenantService._resolve_max_stations(company_id, sheets_service)
             }
 
-        # (3) 新增場站至個人監控 /新增 [代號或名稱]
-        if norm_cmd.startswith("/新增") or norm_cmd.startswith("新增") or norm_cmd.startswith("/加入") or norm_cmd.startswith("加入"):
-            parts = re.split(r"\s+", norm_cmd, maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                return {
-                    "action": "error",
-                    "error": "請指定要新增的場站代號或名稱！\n例如：/新增 01 或 /新增 松山撫遠場"
-                }
-            query_arg = parts[1].strip()
-            res = sheets_service.add_user_subscription(user_id, company_id, query_arg)
+        # (3) 新增場站至個人監控 /新增 [代號或名稱] (支援多站如 /新增 36 37；無空白複合口語交由第 9 步 NLU 處理)
+        if norm_cmd in ["/新增", "新增", "/加入", "加入"]:
             return {
-                "action": "add_subscription",
-                "company_name": company_name,
-                "result": res
+                "action": "error",
+                "error": "請指定要新增的場站代號或名稱！\n例如：/新增 01、/新增 36 37 或直接說「幫我把前金成功場列入監控」"
             }
+        add_cmd_match = re.match(r"^/?(?:新增|加入)\s+(.+)$", norm_cmd)
+        if add_cmd_match and not re.search(r"(車位|冷卻|靜音|少於|小於|低於|大於|超過)", add_cmd_match.group(1)):
+            query_arg = add_cmd_match.group(1).strip()
+            candidates = (
+                sheets_service.fetch_candidate_sites(company_id, user_id)
+                if hasattr(sheets_service, "fetch_candidate_sites")
+                else []
+            )
+            matched_list = extract_stations(query_arg, candidates, allow_bare_codes=True) if candidates else []
+            tokens = matched_list if len(matched_list) > 1 else TenantService._split_raw_station_tokens(query_arg)
+            if len(matched_list) == 1:
+                tokens = [matched_list[0]]
 
-        # (4) 移除個人監控場站 /移除 [代號或名稱]
-        if norm_cmd.startswith("/移除") or norm_cmd.startswith("移除") or norm_cmd.startswith("/刪除") or norm_cmd.startswith("刪除"):
-            parts = re.split(r"\s+", norm_cmd, maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
+            if len(tokens) == 1:
+                res = sheets_service.add_user_subscription(user_id, company_id, tokens[0])
                 return {
-                    "action": "error",
-                    "error": "請指定要移除的場站代號或名稱！\n例如：/移除 01 或 /移除 撫遠"
+                    "action": "add_subscription",
+                    "company_name": company_name,
+                    "result": res
                 }
-            query_arg = parts[1].strip()
-            res = sheets_service.remove_user_subscription(user_id, query_arg, company_id=company_id)
+            return TenantService._execute_batch_add_and_configure(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=tokens,
+                sheets_service=sheets_service,
+            )
+
+        # (4) 移除個人監控場站 /移除 [代號或名稱] (支援多站如 /移除 03 04)
+        if norm_cmd in ["/移除", "移除", "/刪除", "刪除"]:
             return {
-                "action": "remove_subscription",
-                "company_name": company_name,
-                "result": res
+                "action": "error",
+                "error": "請指定要移除的場站代號或名稱！\n例如：/移除 01、/移除 03 04 或直接說「取消監控前金成功場」"
             }
+        rm_cmd_match = re.match(r"^/?(?:移除|刪除)\s+(.+)$", norm_cmd)
+        if rm_cmd_match:
+            query_arg = rm_cmd_match.group(1).strip()
+            user_subs_now = sheets_service.fetch_user_subscriptions(user_id)
+            matched_rm = extract_stations(query_arg, user_subs_now, allow_bare_codes=True) if user_subs_now else []
+            tokens = matched_rm if len(matched_rm) > 1 else TenantService._split_raw_station_tokens(query_arg)
+            if len(matched_rm) == 1:
+                tokens = [matched_rm[0]]
+
+            if len(tokens) == 1:
+                res = sheets_service.remove_user_subscription(user_id, tokens[0], company_id=company_id)
+                return {
+                    "action": "remove_subscription",
+                    "company_name": company_name,
+                    "result": res
+                }
+            return TenantService._execute_batch_remove(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=tokens,
+                sheets_service=sheets_service,
+            )
 
         # (5) 查詢個人監控場站 /查詢 或 /設定
         if norm_cmd in ["/查詢", "查詢", "/設定", "設定", "/list", "我的場站", "/我的場站"]:
@@ -741,40 +958,158 @@ class TenantService:
                     "error": f"更新全域參數「{p_key_raw}」失敗，請檢查試算表連線狀態。"
                 }
 
-        # (9) 自然語言對話解析 (方案 C 雙軌 AI 引擎)
+        # (9) 自然語言對話解析 (方案 B：第 1 軌 <1ms 極速語意 + 第 2 軌 Gemini Interactions API 備援)
         user_subs = sheets_service.fetch_user_subscriptions(user_id)
         user_station_names = [s.get("station_name") for s in user_subs if s.get("station_name")]
+        candidates = (
+            sheets_service.fetch_candidate_sites(company_id, user_id)
+            if hasattr(sheets_service, "fetch_candidate_sites")
+            else []
+        )
 
-        nlp_res = NLPService.understand_user_message(norm_cmd, allowed_stations=user_station_names)
+        nlp_res = NLPService.understand_user_message(
+            norm_cmd,
+            allowed_stations=user_station_names,
+            candidate_stations=candidates,
+        )
         intent = nlp_res.get("intent")
         eff_max = TenantService._resolve_max_stations(company_id, sheets_service)
 
-        if intent == "help":
+        if intent == "rebind":
+            sheets_service.unbind_user(user_id)
+            return {"action": "auth_required", "user_id": user_id, "text": raw_cmd}
+
+        elif intent == "help":
             return {"action": "help", "profile": profile, "user_id": user_id, "max_count": eff_max}
+
+        elif intent == "list_candidates":
+            cand_err = getattr(sheets_service, "last_error", None)
+            if not candidates and isinstance(cand_err, str) and cand_err:
+                return {
+                    "action": "error",
+                    "error": "⏳ 雲端試算表讀取忙碌中，請稍候 3 秒再試一次（您的企業綁定與監控場站皆安全保留）！"
+                }
+            return {
+                "action": "list_candidates",
+                "company_name": company_name,
+                "candidates": candidates,
+                "current_count": len(user_subs),
+                "max_count": eff_max,
+            }
+
         elif intent == "query":
-            return {"action": "query", "company_name": company_name, "company_id": company_id, "settings": user_subs, "max_count": eff_max}
+            sub_err = getattr(sheets_service, "last_error", None)
+            if not user_subs and isinstance(sub_err, str) and sub_err:
+                return {
+                    "action": "error",
+                    "error": "⏳ 雲端試算表讀取忙碌中，請稍候 3 秒再試一次（您的監控場站設定皆安全保留）！"
+                }
+            return {
+                "action": "query",
+                "company_name": company_name,
+                "company_id": company_id,
+                "settings": user_subs,
+                "max_count": eff_max,
+            }
+
+        elif intent == "add_subscription":
+            stations = nlp_res.get("stations") or (
+                [nlp_res["station_name"]] if nlp_res.get("station_name") else []
+            )
+            space_cfg = nlp_res.get("space_setting")
+            cool_cfg = nlp_res.get("cooldown_setting")
+            if len(stations) == 1 and not space_cfg and not cool_cfg:
+                res = sheets_service.add_user_subscription(user_id, company_id, stations[0])
+                return {
+                    "action": "add_subscription",
+                    "company_name": company_name,
+                    "result": res,
+                    "is_nlp": True,
+                }
+            return TenantService._execute_batch_add_and_configure(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=stations,
+                sheets_service=sheets_service,
+                space_cfg=space_cfg,
+                cool_cfg=cool_cfg,
+            )
+
+        elif intent == "remove_subscription":
+            stations = nlp_res.get("stations") or (
+                [nlp_res["station_name"]] if nlp_res.get("station_name") else []
+            )
+            if len(stations) == 1:
+                res = sheets_service.remove_user_subscription(user_id, stations[0], company_id=company_id)
+                return {
+                    "action": "remove_subscription",
+                    "company_name": company_name,
+                    "result": res,
+                    "is_nlp": True,
+                }
+            return TenantService._execute_batch_remove(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=stations,
+                sheets_service=sheets_service,
+            )
+
         elif intent == "set_space":
-            stn = nlp_res.get("station_name")
+            stations = nlp_res.get("stations") or (
+                [nlp_res["station_name"]] if nlp_res.get("station_name") else []
+            )
             low = nlp_res.get("lower", "無")
             up = nlp_res.get("upper", "無")
-            res = sheets_service.update_user_station_space(
-                line_user_id=user_id,
-                station_query=stn,
-                lower=low,
-                upper=up
+            candidate_names = {c.get("station_name") for c in candidates if isinstance(c, dict)}
+            needs_auto_add = (
+                len(stations) == 1
+                and stations[0] not in user_station_names
+                and stations[0] in candidate_names
+                and (low != "無" or up != "無")
             )
-            return {"action": "space_update", "company_name": company_name, "result": res, "is_nlp": True}
+            if len(stations) == 1 and not needs_auto_add:
+                res = sheets_service.update_user_station_space(
+                    line_user_id=user_id,
+                    station_query=stations[0],
+                    lower=low,
+                    upper=up,
+                )
+                return {"action": "space_update", "company_name": company_name, "result": res, "is_nlp": True}
+
+            return TenantService._execute_batch_add_and_configure(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=stations,
+                sheets_service=sheets_service,
+                space_cfg={"lower": low, "upper": up},
+                auto_add=(low != "無" or up != "無"),
+            )
+
         elif intent == "set_cooldown":
-            stn = nlp_res.get("station_name", "全部")
+            stations = nlp_res.get("stations") or [nlp_res.get("station_name", "全部")]
             atype = nlp_res.get("alert_type", "車位")
             hrs = nlp_res.get("cooldown_hours", 12)
-            res = sheets_service.update_user_station_cooldown(
-                line_user_id=user_id,
-                station_query=stn,
-                alert_type=atype,
-                hours=hrs
+            if len(stations) == 1:
+                res = sheets_service.update_user_station_cooldown(
+                    line_user_id=user_id,
+                    station_query=stations[0],
+                    alert_type=atype,
+                    hours=hrs,
+                )
+                return {"action": "cooldown_update", "company_name": company_name, "result": res, "is_nlp": True}
+
+            return TenantService._execute_batch_add_and_configure(
+                user_id=user_id,
+                company_id=company_id,
+                company_name=company_name,
+                stations=stations,
+                sheets_service=sheets_service,
+                cool_cfg={"alert_type": atype, "cooldown_hours": hrs},
+                auto_add=False,
             )
-            return {"action": "cooldown_update", "company_name": company_name, "result": res, "is_nlp": True}
 
         # (10) 未知口語引導
         return {

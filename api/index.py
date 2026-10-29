@@ -161,6 +161,21 @@ if line_service.handler:
                     )
                 line_service.reply_flex(reply_token, bubble, alt_text="移除監控結果")
 
+            # 5.5 多場站批次操作或複合門檻設定結果
+            elif action == "batch_operation":
+                quick_nav_buttons = [
+                    {"label": "🔄 返回可選場站清單", "text": "/可選場站", "style": "primary", "color": "#0284C7"},
+                    {"label": "📋 查看我的監控清單", "text": "/查詢", "style": "secondary"},
+                ]
+                bubble = line_service.build_command_result_flex_bubble(
+                    cmd_res.get("title", "場站批次操作結果"),
+                    cmd_res.get("message", ""),
+                    cmd_res.get("details", []),
+                    is_success=cmd_res.get("is_success", True),
+                    footer_buttons=quick_nav_buttons,
+                )
+                line_service.reply_flex(reply_token, bubble, alt_text=cmd_res.get("title", "批次操作結果"))
+
             # 6. 教學手冊 /?
             elif action == "help":
                 bubble = line_service.build_help_flex_bubble(
@@ -281,7 +296,7 @@ if line_service.handler:
                     f"• /可選場站 (完整列出名單，可點擊右側新增/移除)\n"
                     f"• /查詢 (查看我的監控與門檻)\n"
                     f"• /車位 [代號] [下限] [上限] (設定車位警報)\n"
-                    f"• 亦可直接說「撫遠場車位少於5個時警報」\n\n"
+                    f"• 💬 口語直接說：「幫我把前金成功場跟青埔二場列入監控」或「撫遠場車位少於5格通知我」\n\n"
                     f"💡 輸入「/?」即可開啟專屬詳細指令手冊！"
                 )
     except Exception as e:
@@ -310,7 +325,8 @@ def health_check():
         "has_sa_b64": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_BASE64")),
         "has_sa_file": os.path.exists("service_account.json"),
         "has_spreadsheet_id": bool(sheets_service.spreadsheet_id),
-        "has_master_spreadsheet_id": bool(sheets_service.master_spreadsheet_id)
+        "has_master_spreadsheet_id": bool(sheets_service.master_spreadsheet_id),
+        "has_gemini_key": bool(os.getenv("GEMINI_API_KEY")),
     }
 
 @app.post("/api/v1/trigger")

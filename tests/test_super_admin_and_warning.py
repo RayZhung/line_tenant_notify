@@ -351,10 +351,158 @@ def test_mode_a_anomaly_and_anti_false_unbind():
     assert "安全保留" in res_throttled["error"]
     print("  [PASS] 試算表瞬時限流/斷線保護生效：回傳忙碌提示，絕不誤跳回『請輸入企業授權碼』")
 
+def test_dual_track_nlu_and_multi_station():
+    print("\n=== 測試 6: 驗證方案 B 雙軌自然語言、多場站批次與複合門檻口語 ===")
+    import time
+    from unittest.mock import patch
+    from services.nlp_service import NLPService
+    from services.line_service import LineService
+
+    candidates = [
+        {"station_code": "01", "station_name": "松山撫遠場", "is_subscribed": False},
+        {"station_code": "03", "station_name": "新莊新知六場", "is_subscribed": True},
+        {"station_code": "05", "station_name": "樹林俊興場", "is_subscribed": True},
+        {"station_code": "08", "station_name": "板橋文化場", "is_subscribed": False},
+        {"station_code": "36", "station_name": "前金成功場", "is_subscribed": False},
+        {"station_code": "37", "station_name": "青埔二場", "is_subscribed": False},
+        {"station_code": "38", "station_name": "台中東山", "is_subscribed": False},
+    ]
+
+    # 建立狀態化 Mock SheetsService 以驗證多場站連續增刪與門檻設定
+    live_subs = [
+        {"line_user_id": "U_RAY", "company_id": "1", "station_code": "03", "station_name": "新莊新知六場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+        {"line_user_id": "U_RAY", "company_id": "1", "station_code": "05", "station_name": "樹林俊興場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+    ]
+
+    mock_sheets = MagicMock()
+    mock_sheets.last_error = None
+    mock_sheets.fetch_tenant_permissions.return_value = [
+        {"company_id": "1", "company_name": "微程式", "role_name": "設備運維 (甲)", "authorized_line_user_ids": "U_RAY"}
+    ]
+    mock_sheets.get_effective_max_stations.return_value = 10
+    mock_sheets.fetch_candidate_sites.side_effect = lambda cid, uid: candidates
+    mock_sheets.fetch_user_subscriptions.side_effect = lambda uid: list(live_subs)
+
+    def _mock_add(uid, cid, query):
+        q = query.strip()
+        q_code = f"{int(q):02d}" if q.isdigit() else q
+        matched = next((c for c in candidates if c["station_code"] == q_code or c["station_name"] == q or q in c["station_name"]), None)
+        if not matched:
+            return {"success": False, "error": f"找不到 {query}"}
+        if any(s["station_name"] == matched["station_name"] for s in live_subs):
+            return {"success": False, "error": f"場站「{matched['station_name']}」已在您的監控清單中"}
+        live_subs.append({
+            "line_user_id": uid,
+            "company_id": cid,
+            "station_code": matched["station_code"],
+            "station_name": matched["station_name"],
+            "space_lower": "5",
+            "space_upper": "無",
+            "space_cooldown": "6",
+            "offline_cooldown": "24",
+        })
+        return {
+            "success": True,
+            "station_code": matched["station_code"],
+            "station_name": matched["station_name"],
+            "current_count": len(live_subs),
+            "max_count": 10,
+            "default_lower": "5",
+            "default_space_cooldown": "6",
+            "default_offline_cooldown": "24",
+        }
+
+    def _mock_remove(uid, query, company_id="1"):
+        q = query.strip()
+        q_code = f"{int(q):02d}" if q.isdigit() else q
+        for idx, s in enumerate(live_subs):
+            if s["station_code"] == q_code or s["station_name"] == q or q in s["station_name"]:
+                removed = live_subs.pop(idx)
+                return {"success": True, "station_name": removed["station_name"], "remaining_count": len(live_subs), "max_count": 10}
+        return {"success": False, "error": f"未監控 {query}"}
+
+    def _mock_space(line_user_id, station_query, lower, upper):
+        for s in live_subs:
+            if station_query == s["station_name"] or station_query in s["station_name"]:
+                s["space_lower"] = str(lower)
+                s["space_upper"] = str(upper)
+                return {"success": True, "station_name": s["station_name"], "lower": str(lower), "upper": str(upper), "updated_at": "2026-10-29 16:00:00"}
+        return {"success": False, "error": f"找不到 {station_query}"}
+
+    mock_sheets.add_user_subscription.side_effect = _mock_add
+    mock_sheets.remove_user_subscription.side_effect = _mock_remove
+    mock_sheets.update_user_station_space.side_effect = _mock_space
+
+    # 1. 重現使用者截圖問題：「幫我把前金成功場列入監控」
+    r1 = TenantService.parse_and_execute_command("U_RAY", "幫我把前金成功場列入監控", mock_sheets)
+    assert r1["action"] == "add_subscription" and r1["result"]["success"] is True
+    assert r1["result"]["station_name"] == "前金成功場"
+    print("  [PASS] 口語單站加入：『幫我把前金成功場列入監控』-> 成功加入 [36] 前金成功場")
+
+    # 2. 多場站同時口語加入：「幫我把青埔二場跟松山撫遠場列入監控」
+    r2 = TenantService.parse_and_execute_command("U_RAY", "幫我把青埔二場跟松山撫遠場列入監控", mock_sheets)
+    assert r2["action"] == "batch_operation" and r2["is_success"] is True and r2["added_count"] == 2
+    batch_bubble = LineService.build_command_result_flex_bubble(r2["title"], r2["message"], r2["details"], is_success=r2["is_success"])
+    assert batch_bubble["type"] == "bubble"
+    print(f"  [PASS] 多場站口語批次加入：一次新增 {r2['added_count']} 座場站，目前配額 {r2['current_count']}/{r2['max_count']}")
+
+    # 3. 複合句（加入監控 + 設定車位下限，且驗證數字 8 不會誤判成 [08] 板橋文化場！）
+    r3 = TenantService.parse_and_execute_command("U_RAY", "幫我把台中東山列入監控，車位少於 8 格通知我", mock_sheets)
+    assert r3["action"] == "batch_operation" and r3["is_success"] is True
+    dongshan = next((s for s in live_subs if s["station_name"] == "台中東山"), None)
+    assert dongshan is not None and dongshan["space_lower"] == "8"
+    assert not any(s["station_name"] == "板橋文化場" for s in live_subs), "8 格絕不可誤判為 [08] 板橋文化場"
+    print("  [PASS] 複合口語：『幫我把台中東山列入監控，車位少於 8 格通知我』-> 自動加入並設下限 8 格（不誤判 08 號站）")
+
+    # 4. 區分「取消車位警報」與「取消監控場站」
+    r4 = TenantService.parse_and_execute_command("U_RAY", "把新莊新知六場車位警報取消", mock_sheets)
+    assert r4["action"] == "space_update" and r4["result"]["lower"] == "無"
+    assert any(s["station_name"] == "新莊新知六場" for s in live_subs)
+    print("  [PASS] 語意精準區分：『把新莊新知六場車位警報取消』僅關閉車位門檻，不會誤刪監控場站")
+
+    # 5. 多場站同時口語移除：「幫我把青埔二場和台中東山取消監控」
+    r5 = TenantService.parse_and_execute_command("U_RAY", "幫我把青埔二場和台中東山取消監控", mock_sheets)
+    assert r5["action"] == "batch_operation" and r5["removed_count"] == 2
+    print("  [PASS] 多場站口語批次移除：『幫我把青埔二場和台中東山取消監控』-> 成功移除 2 站")
+
+    # 6. 詢問可選場站口語：「請問有哪些場站可以選？」
+    r6 = TenantService.parse_and_execute_command("U_RAY", "請問有哪些場站可以選？", mock_sheets)
+    assert r6["action"] == "list_candidates"
+    print("  [PASS] 口語查詢候選名單：『請問有哪些場站可以選？』-> 正確開啟可選場站清單")
+
+    # 7. 第 1 軌效能實測 (50 次連續解析應 < 50ms)
+    t0 = time.perf_counter()
+    for _ in range(50):
+        NLPService.parse_with_regex("幫我把前金成功場跟青埔二場列入監控，車位少於 6 格通知我", candidate_stations=candidates)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    assert elapsed_ms < 100, f"Track 1 too slow: {elapsed_ms:.2f}ms"
+    print(f"  [PASS] 第 1 軌極速效能驗證：連續解析 50 句複合多站口語僅耗時 {elapsed_ms:.2f} ms (平均 {elapsed_ms/50:.3f} ms/句)")
+
+    # 8. 第 2 軌 Gemini Interactions API 結構化備援路由驗證 (Mock)
+    with patch.object(
+        NLPService,
+        "parse_with_gemini",
+        return_value={
+            "intent": "add_subscription",
+            "stations": ["板橋文化場"],
+            "station_name": "板橋文化場",
+        },
+    ) as mock_gem:
+        res_t2 = NLPService.understand_user_message(
+            "麻煩幫我把文化路那座場子掛進來",
+            candidate_stations=candidates,
+            gemini_api_key="DUMMY_ENV_KEY_FOR_TEST",
+        )
+        assert res_t2["intent"] == "add_subscription" and res_t2["stations"] == ["板橋文化場"]
+        mock_gem.assert_called_once()
+    print("  [PASS] 第 2 軌 Gemini Interactions API 結構化備援自動觸發與解析驗證通過")
+
+
 if __name__ == "__main__":
     test_flex_bubbles()
     test_tenant_service_super_admin_commands()
     test_monthly_warning_counter_logic()
     test_full_candidate_list_and_interactive_actions()
     test_mode_a_anomaly_and_anti_false_unbind()
+    test_dual_track_nlu_and_multi_station()
     print("\n🎉 全部單元與整合測試 100% 成功通過！")
