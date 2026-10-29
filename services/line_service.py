@@ -1,9 +1,9 @@
 """
 LINE Messaging API 推播與訊息建置模組
 支援:
-  1. Flex Message 高質感視覺化告警卡片
-  2. 精準特定 User ID Push 訊息推播 (完全隔離多租戶)
-  3. LINE Webhook 簽章驗證與指令回覆
+  1. 多租戶 (Company) 與 角色 (Role 甲/乙) 專屬 Flex Message 高質感視覺化告警卡片
+  2. 精準特定 User ID Push 訊息推播 (完全隔離多租戶與角色職責)
+  3. LINE Webhook 簽章驗證與指令回覆 (發送任何訊息自動回覆 User ID)
 """
 import os
 import json
@@ -80,7 +80,7 @@ class LineService:
                     f"👋 您好！我是「場域訊息通報」機器人。\n\n"
                     f"您的 LINE User ID 為：\n👉 {user_id}\n\n"
                     f"💡 請將此 User ID 提供給系統管理者，填入「多租戶權限表」，"
-                    f"即可接收您所屬場站的即時營運與異常推播！"
+                    f"即可接收您所屬企業與角色（甲：運維 / 乙：營運）之即時異常推播！"
                 )
                 try:
                     self.messaging_api.reply_message(
@@ -95,59 +95,99 @@ class LineService:
             logger.warning(f"Could not register message handlers: {e}")
 
     @staticmethod
-    def build_anomaly_flex_bubble(tenant_name: str, anomalies: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def build_role_anomaly_flex_bubble(
+        company_name: str, 
+        role_name: str, 
+        anomalies: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """
-        建構 Flex Message 異常通知卡片 (JSON Bubble)
+        建構多租戶角色專屬 Flex Message 異常通知卡片 (JSON Bubble)
+        根據角色類別自動調整色系 (運維紅色系 / 營運靛紫色系)
         """
+        # 判斷是否為設備運維類別 (甲角色)
+        has_hardware_or_conn = any(
+            item.get("category") in ["CONNECTIVITY", "HARDWARE"] 
+            for item in anomalies
+        ) or "運維" in role_name or "甲" in role_name
+
+        header_bg = "#DC2626" if has_hardware_or_conn else "#4F46E5"
+        header_title = "🚨 場站設備運維警報" if has_hardware_or_conn else "📊 場站營運車位警報"
+
         rows = []
         for item in anomalies:
             station_name = item.get("station_name", "未知場站")
+            station_ip = item.get("station_ip", "-")
+            category_label = item.get("category_label") or item.get("category", "異常")
             metric_name = item.get("metric_name", "數值")
             curr_val = item.get("current_value", 0)
             thresh = item.get("threshold", 0)
+            details = item.get("details", "")
+
+            row_contents = [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"📍 {station_name}",
+                            "weight": "bold",
+                            "size": "sm",
+                            "color": "#0F172A",
+                            "flex": 3
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{category_label}",
+                            "size": "xxs",
+                            "color": "#EF4444" if has_hardware_or_conn else "#6366F1",
+                            "align": "end",
+                            "weight": "bold",
+                            "flex": 2
+                        }
+                    ]
+                }
+            ]
+
+            # 運維人員特別標註 IP
+            if station_ip and station_ip != "-":
+                row_contents.append({
+                    "type": "text",
+                    "text": f"🌐 IP位址: {station_ip}",
+                    "size": "xxs",
+                    "color": "#3B82F6",
+                    "margin": "xs"
+                })
+
+            # 數值資訊
+            row_contents.append({
+                "type": "text",
+                "text": f"⚠️ {metric_name}: {curr_val} (標準: {thresh})",
+                "size": "xs",
+                "color": "#334155",
+                "margin": "xs",
+                "weight": "bold"
+            })
+
+            # 詳細狀況
+            if details:
+                row_contents.append({
+                    "type": "text",
+                    "text": f"ℹ️ {details}",
+                    "size": "xxs",
+                    "color": "#64748B",
+                    "margin": "xs",
+                    "wrap": True
+                })
 
             rows.append({
                 "type": "box",
                 "layout": "vertical",
                 "margin": "md",
-                "contents": [
-                    {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"📍 {station_name}",
-                                "weight": "bold",
-                                "size": "sm",
-                                "color": "#1E293B",
-                                "flex": 3
-                            },
-                            {
-                                "type": "text",
-                                "text": "⚠️ 低於警戒",
-                                "size": "xs",
-                                "color": "#EF4444",
-                                "align": "end",
-                                "weight": "bold",
-                                "flex": 2
-                            }
-                        ]
-                    },
-                    {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "margin": "xs",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"{metric_name}: {curr_val} (標準: {thresh})",
-                                "size": "xs",
-                                "color": "#64748B"
-                            }
-                        ]
-                    }
-                ]
+                "backgroundColor": "#F8FAFC",
+                "cornerRadius": "8px",
+                "paddingAll": "10px",
+                "contents": row_contents
             })
 
         update_time = anomalies[0].get("update_time", "剛剛") if anomalies else "剛剛"
@@ -158,22 +198,23 @@ class LineService:
             "header": {
                 "type": "box",
                 "layout": "vertical",
-                "backgroundColor": "#DC2626",
+                "backgroundColor": header_bg,
                 "paddingAll": "16px",
                 "contents": [
                     {
                         "type": "text",
-                        "text": "🚨 場站營運異常警報",
+                        "text": header_title,
                         "weight": "bold",
                         "color": "#FFFFFF",
                         "size": "lg"
                     },
                     {
                         "type": "text",
-                        "text": f"客戶專屬通知: {tenant_name}",
-                        "color": "#FEE2E2",
+                        "text": f"🏢 企業: {company_name} ｜ 👤 對象: {role_name}",
+                        "color": "#FEE2E2" if has_hardware_or_conn else "#E0E7FF",
                         "size": "xs",
-                        "margin": "xs"
+                        "margin": "xs",
+                        "weight": "bold"
                     }
                 ]
             },
@@ -184,7 +225,7 @@ class LineService:
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"系統於 {update_time} 檢測到以下場站低於安全警戒值，請儘速指派人員處理：",
+                        "text": f"巡檢時間：{update_time}，檢測到以下異常項目，請儘速指派相關人員處理：",
                         "size": "xs",
                         "color": "#475569",
                         "wrap": True
@@ -199,11 +240,11 @@ class LineService:
             "footer": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "12px",
+                "paddingAll": "10px",
                 "contents": [
                     {
                         "type": "text",
-                        "text": "⚠️ 資料僅發送給授權之管理員，嚴格落實多租戶隔離。",
+                        "text": "🔒 企業與角色雙重隔離保護・僅授權人員可見",
                         "size": "xxs",
                         "color": "#94A3B8",
                         "align": "center"
@@ -213,15 +254,21 @@ class LineService:
         }
         return flex_bubble
 
-    def send_tenant_anomaly_alert(self, user_id: str, tenant_name: str, anomalies: List[Dict[str, Any]]) -> bool:
+    def send_role_anomaly_alert(
+        self, 
+        user_id: str, 
+        company_name: str, 
+        role_name: str, 
+        anomalies: List[Dict[str, Any]]
+    ) -> bool:
         """
-        向指定 LINE User ID 推送專屬告警訊息
+        向指定 LINE User ID 推送專屬告警訊息 (支援角色客製卡片)
         """
-        flex_dict = self.build_anomaly_flex_bubble(tenant_name, anomalies)
-        alt_text = f"【警報】{tenant_name} 共有 {len(anomalies)} 個場站低於警戒值"
+        flex_dict = self.build_role_anomaly_flex_bubble(company_name, role_name, anomalies)
+        alt_text = f"【警報】{company_name} ({role_name}) 共有 {len(anomalies)} 項場站異常"
 
         if not self.channel_access_token:
-            logger.info(f"[Mock Push] Sent alert for {tenant_name} to User: {user_id}. Anomalies count: {len(anomalies)}")
+            logger.info(f"[Mock Push] Sent alert for {company_name} ({role_name}) to User: {user_id}. Anomalies count: {len(anomalies)}")
             return True
 
         try:
@@ -233,14 +280,14 @@ class LineService:
                     messages=[flex_msg]
                 )
                 self.messaging_api.push_message(request)
-                logger.info(f"Successfully sent Flex push alert to {user_id} ({tenant_name})")
+                logger.info(f"Successfully sent Flex push alert to {user_id} ({company_name} - {role_name})")
                 return True
             elif LINE_SDK_AVAILABLE == "v2" and hasattr(self, "line_bot_api"):
                 self.line_bot_api.push_message(
                     user_id,
                     FlexSendMessage(alt_text=alt_text, contents=flex_dict)
                 )
-                logger.info(f"Successfully sent v2 push alert to {user_id} ({tenant_name})")
+                logger.info(f"Successfully sent v2 push alert to {user_id} ({company_name} - {role_name})")
                 return True
             else:
                 logger.warning(f"No LINE SDK available. Alert logged for {user_id}: {alt_text}")
@@ -248,3 +295,7 @@ class LineService:
         except Exception as e:
             logger.error(f"Failed to push LINE alert to {user_id}: {e}")
             return False
+
+    def send_tenant_anomaly_alert(self, user_id: str, tenant_name: str, anomalies: List[Dict[str, Any]]) -> bool:
+        """相容舊版介面"""
+        return self.send_role_anomaly_alert(user_id, tenant_name, "管理員", anomalies)

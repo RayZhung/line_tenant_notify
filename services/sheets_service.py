@@ -7,6 +7,9 @@ import json
 import base64
 import logging
 from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("sheets_service")
 
@@ -107,7 +110,8 @@ class SheetsService:
             sh = self.client.open_by_key(self.spreadsheet_id)
             worksheet = sh.worksheet(self.sheet_name_data)
             records = worksheet.get_all_records()
-            return records
+            clean_records = [{str(k).strip(): v for k, v in r.items()} for r in records]
+            return clean_records
         except Exception as e:
             logger.error(f"Error reading operations worksheet: {e}")
             return []
@@ -147,7 +151,8 @@ class SheetsService:
             sh = self.client.open_by_key(self.spreadsheet_id)
             worksheet = sh.worksheet(self.sheet_name_tenants)
             records = worksheet.get_all_records()
-            return records
+            clean_records = [{str(k).strip(): v for k, v in r.items()} for r in records]
+            return clean_records
         except Exception as e:
             logger.error(f"Error reading tenant permissions worksheet: {e}")
             return []

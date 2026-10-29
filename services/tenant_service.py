@@ -1,100 +1,155 @@
 """
-多租戶權限與資料隔離服務 (Tenant Isolation Service)
-核心原則: 確保不同客戶間的營業與異常數據絕對隔離
+多租戶與角色權限隔離服務 (Tenant & Role RBAC Isolation Service)
+核心原則:
+  1. 企業資料絕對隔離 (公司 A 絕對看不到公司 B 的資料)
+  2. 角色職責精準分流 (運維人員【甲】只收設備/連線，營運人員【乙】只收車位/營收)
 """
 import logging
 from typing import List, Dict, Any
 
 logger = logging.getLogger("tenant_service")
 
+# 異常類別定義
+CATEGORY_MAP = {
+    "CONNECTIVITY": "🔌 場站連線狀態",
+    "HARDWARE": "🖨️ 設備硬體消耗",
+    "CAPACITY": "🚗 車流車位狀況",
+    "REVENUE": "💰 營收交易異常"
+}
+
 class TenantService:
     @staticmethod
     def filter_anomalies(operations_data: List[Dict[str, Any]], default_threshold: float = 10.0) -> List[Dict[str, Any]]:
         """
-        篩選出當前低於警戒標準的異常場站資料
+        篩選出當前異常的場站數據
+        支援兩種判斷：
+          1. status 欄位明確為 ANOMALY / 異常
+          2. current_value 數值低於 threshold 門檻
         """
         anomalies = []
         for row in operations_data:
             try:
-                # 取得數值與警戒值
+                station_name = str(row.get("station_name") or row.get("停車場名稱") or "未知場站").strip()
+                station_ip = str(row.get("station_ip") or row.get("IP位址") or row.get("IP") or "-").strip()
+                company_id = str(row.get("company_id") or row.get("tenant_id") or row.get("授權企業") or "").strip()
+                company_name = str(row.get("company_name") or row.get("公司名稱") or "").strip()
+                category = str(row.get("category") or "HARDWARE").strip().upper()
+                metric_name = str(row.get("metric_name") or "指標項目").strip()
+                details = str(row.get("details") or "").strip()
+                status_val = str(row.get("status") or "").strip().upper()
+                update_time = str(row.get("update_time") or "剛剛").strip()
+
                 val_raw = row.get("current_value") or row.get("metric_value", 0)
-                current_val = float(val_raw)
-
                 thresh_raw = row.get("threshold", default_threshold)
-                threshold = float(thresh_raw) if thresh_raw else default_threshold
 
-                # 判斷是否異常 (低於警戒值)
-                if current_val < threshold:
+                # 判斷是否為異常
+                is_anomaly = False
+                current_val = val_raw
+                threshold = thresh_raw
+
+                if status_val in ["ANOMALY", "ABNORMAL", "ERROR", "OFFLINE", "異常"]:
+                    is_anomaly = True
+                else:
+                    # 數值比對判斷
+                    try:
+                        c_float = float(val_raw)
+                        t_float = float(thresh_raw)
+                        current_val = c_float
+                        threshold = t_float
+                        if c_float < t_float:
+                            is_anomaly = True
+                    except (ValueError, TypeError):
+                        # 字串比對 (例如狀態不符)
+                        if str(val_raw).strip().upper() != str(thresh_raw).strip().upper():
+                            is_anomaly = True
+
+                if is_anomaly:
                     anomalies.append({
-                        "station_id": str(row.get("station_id", "UNKNOWN")),
-                        "station_name": str(row.get("station_name", "未命名場站")),
-                        "tenant_id": str(row.get("tenant_id", "")).strip(),
-                        "metric_name": str(row.get("metric_name", "指標數值")),
+                        "station_name": station_name,
+                        "station_ip": station_ip,
+                        "company_id": company_id,
+                        "company_name": company_name,
+                        "category": category,
+                        "category_label": CATEGORY_MAP.get(category, category),
+                        "metric_name": metric_name,
                         "current_value": current_val,
                         "threshold": threshold,
-                        "gap": round(threshold - current_val, 2),
-                        "update_time": str(row.get("update_time", "剛剛"))
+                        "details": details,
+                        "update_time": update_time
                     })
-            except (ValueError, TypeError) as e:
-                logger.error(f"Error parsing row data for anomaly detection: {row}, error: {e}")
+            except Exception as e:
+                logger.error(f"Error filtering anomaly row: {row}, error: {e}")
                 continue
 
         return anomalies
 
     @staticmethod
-    def map_anomalies_to_tenants(
+    def map_anomalies_to_roles(
         anomalies: List[Dict[str, Any]], 
         tenant_permissions: List[Dict[str, Any]]
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         """
-        多租戶隔離映射：
-        將異常場站比對權限表，僅歸納入各自客戶群組，並綁定專屬的 LINE User ID 列表。
+        雙重隔離映射矩陣：
+          第 1 重：比對 company_id 確保企業資料絕對隔離
+          第 2 重：比對 subscribed_categories 確保角色職責精準分流 (甲收甲的、乙收乙的)
         
         回傳結構:
-        {
-          "TENANT_A": {
-            "tenant_name": "優質車行股份有限公司",
-            "line_user_ids": ["U12345...", "U67890..."],
+        [
+          {
+            "company_id": "1",
+            "company_name": "微程式",
+            "role_name": "設備運維 (甲)",
+            "line_user_ids": ["U42607..."],
             "anomalies": [...]
           },
           ...
-        }
+        ]
         """
-        # 1. 建立租戶權限索引
-        tenant_map = {}
-        for tp in tenant_permissions:
-            tid = str(tp.get("tenant_id", "")).strip()
-            if not tid:
-                continue
+        dispatch_plans = []
 
-            # 檢查是否啟用通知
-            notify_enabled = str(tp.get("notify_enabled", "True")).lower() in ["true", "1", "yes"]
+        for rule in tenant_permissions:
+            cid = str(rule.get("company_id") or rule.get("tenant_id") or "").strip()
+            cname = str(rule.get("company_name") or rule.get("tenant_name") or cid).strip()
+            role_name = str(rule.get("role_name") or "管理員").strip()
+
+            notify_enabled = str(rule.get("notify_enabled", "True")).lower() in ["true", "1", "yes"]
             if not notify_enabled:
                 continue
 
-            # 解析 LINE User IDs (逗號或分號分隔)
-            raw_ids = str(tp.get("authorized_line_user_ids", "")).replace(";", ",")
-            id_list = [uid.strip() for uid in raw_ids.split(",") if uid.strip()]
+            # 解析訂閱的類別 (逗號或分號分隔)
+            raw_cats = str(rule.get("subscribed_categories", "ALL")).replace(";", ",").upper()
+            subscribed_cats = [c.strip() for c in raw_cats.split(",") if c.strip()]
+            allow_all = "ALL" in subscribed_cats or len(subscribed_cats) == 0
 
-            tenant_map[tid] = {
-                "tenant_name": str(tp.get("tenant_name", tid)),
-                "line_user_ids": id_list,
-                "anomalies": []
-            }
+            # 解析授權的 LINE User IDs
+            raw_ids = str(rule.get("authorized_line_user_ids", "")).replace(";", ",")
+            user_ids = [uid.strip() for uid in raw_ids.split(",") if uid.strip()]
+            if not user_ids:
+                continue
 
-        # 2. 依據 tenant_id 分流異常，實踐絕對資料隔離
-        for anomaly in anomalies:
-            tid = anomaly.get("tenant_id", "")
-            if tid in tenant_map:
-                tenant_map[tid]["anomalies"].append(anomaly)
-            else:
-                logger.warning(f"Anomaly detected for unmapped or unauthorized tenant_id: '{tid}' (Station: {anomaly.get('station_name')})")
+            # 篩選同時滿足「公司相符」與「類別相符」的異常項目
+            matched_anomalies = []
+            for item in anomalies:
+                item_cid = item.get("company_id", "")
+                item_cat = item.get("category", "")
 
-        # 3. 僅保留有異常場站且有綁定 LINE User ID 的租戶
-        dispatch_targets = {
-            tid: data 
-            for tid, data in tenant_map.items() 
-            if len(data["anomalies"]) > 0 and len(data["line_user_ids"]) > 0
-        }
+                # 1. 公司相符判定 (支援單一編號或如 '1,2' 的授權字串)
+                company_matched = (cid == "ALL") or (cid == item_cid) or (cid in item_cid.split(","))
 
-        return dispatch_targets
+                # 2. 角色類別相符判定
+                category_matched = allow_all or (item_cat in subscribed_cats)
+
+                if company_matched and category_matched:
+                    matched_anomalies.append(item)
+
+            if matched_anomalies:
+                dispatch_plans.append({
+                    "company_id": cid,
+                    "company_name": cname,
+                    "role_name": role_name,
+                    "subscribed_categories": subscribed_cats,
+                    "line_user_ids": user_ids,
+                    "anomalies": matched_anomalies
+                })
+
+        return dispatch_plans

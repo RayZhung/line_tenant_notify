@@ -114,39 +114,42 @@ async def trigger_anomaly_notification(
             "alerts_dispatched": 0
         }
 
-    # 3. 多租戶隔離：比對權限表，分流不同客戶的異常
-    targets = TenantService.map_anomalies_to_tenants(anomalies, tenant_permissions)
+    # 3. 雙重隔離：比對權限表，分流不同企業與角色 (甲/乙)
+    dispatch_plans = TenantService.map_anomalies_to_roles(anomalies, tenant_permissions)
 
-    # 4. 精準推播：針對各客戶授權的 LINE User ID 推送專屬警示
+    # 4. 精準推播：針對各企業角色授權的 LINE User ID 推送專屬警示
     dispatched_count = 0
-    tenant_reports = []
+    delivery_reports = []
 
-    for tenant_id, data in targets.items():
-        tenant_name = data["tenant_name"]
-        line_users = data["line_user_ids"]
-        tenant_anomalies = data["anomalies"]
+    for plan in dispatch_plans:
+        cid = plan["company_id"]
+        cname = plan["company_name"]
+        role_name = plan["role_name"]
+        line_users = plan["line_user_ids"]
+        role_anomalies = plan["anomalies"]
 
         delivered_users = []
         for uid in line_users:
-            success = line_service.send_tenant_anomaly_alert(uid, tenant_name, tenant_anomalies)
+            success = line_service.send_role_anomaly_alert(uid, cname, role_name, role_anomalies)
             if success:
                 delivered_users.append(uid)
                 dispatched_count += 1
 
-        tenant_reports.append({
-            "tenant_id": tenant_id,
-            "tenant_name": tenant_name,
-            "anomalies_count": len(tenant_anomalies),
+        delivery_reports.append({
+            "company_id": cid,
+            "company_name": cname,
+            "role_name": role_name,
+            "anomalies_count": len(role_anomalies),
             "delivered_users": delivered_users
         })
 
     return {
         "status": "success",
-        "message": f"Evaluated {len(operations_data)} stations. Found {len(anomalies)} anomalies across {len(targets)} tenants.",
+        "message": f"Evaluated {len(operations_data)} stations. Found {len(anomalies)} anomalies across {len(dispatch_plans)} role targets.",
         "total_stations_checked": len(operations_data),
         "total_anomalies": len(anomalies),
         "total_alerts_dispatched": dispatched_count,
-        "tenant_breakdown": tenant_reports
+        "delivery_breakdown": delivery_reports
     }
 
 @app.post("/callback")
