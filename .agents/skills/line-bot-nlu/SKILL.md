@@ -34,6 +34,12 @@ To keep LINE Bot webhook latency under `< 1ms` for 95%+ of user utterances while
    - `add_subscription` (列入監控 / 加入 / 訂閱 / 追蹤 / 幫我盯 — supports optional compound `space_setting` and `cooldown_setting` in the same utterance)
    - `set_cooldown` (冷卻 / 靜音 / 間隔 + `6|12|18|24|36` hours or `半天`/`一天`/`一天半`)
    - `set_space` (車位 / 空位 / 滿場 + lower/upper bounds)
+4. **Homophone & Connector Tolerance (Chinese IME Guardrails)**:
+   - Normalize common Zhuyin/Pinyin homophones before matching: `下線` -> `下限`, `上線` -> `上限` (excluding `主機/設備/網路上線`), and `廠` -> `場` during station matching (e.g., `樹林俊興廠` -> `樹林俊興場`, `市府廠` -> `市府場`).
+   - Always allow optional linking connectors between threshold/cooldown keywords and numbers: `(?:設為|改為|改成|設成|調為|調成|調整為|調整到|定為|為|是|設|改|調|到|至|[:：=])?` so phrases like `下線為5上限為15` parse both bounds accurately.
+   - Track `has_lower` and `has_upper` flags explicitly: when a user updates only one bound (e.g., `把樹林俊興場上限改為 20` or `把上限取消`), preserve the station's existing value for the unmentioned bound instead of overwriting it with `"無"`.
+5. **Timezone Consistency (`UTC+8`)**:
+   - Serverless runtimes (Vercel / GitHub Actions) default to `UTC+0`. Always generate naive Taiwan timestamps via `datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)` for user-facing cards, monthly quota rollover, and cooldown comparisons.
 
 ### Track 2: Gemini Structured Output Fallback (`google-genai >= 2.3.0`)
 - Trigger ONLY when Track 1 returns `None` and `os.getenv("GEMINI_API_KEY")` is configured (ISO27001: never hardcode API keys; never pass API keys in URL query strings).
@@ -44,10 +50,16 @@ To keep LINE Bot webhook latency under `< 1ms` for 95%+ of user utterances while
 
 ## 2. Multi-Station & Compound Execution Rules
 
-1. **Batch Add / Remove**:
+1. **Batch Add / Remove & Safe Clear-All Confirmation**:
    - When multiple stations are extracted (e.g., `幫我把前金成功場跟青埔二場列入監控` or `/新增 36 37`), process each station sequentially against live quota (`effective_max`), recording succeeded and skipped items (already subscribed, not found, or quota full) into a single consolidated Flex result bubble.
+   - When the user asks to remove/clear **ALL** monitored stations (e.g., `解除全部的廠站監控`, `清空監控清單`, `/移除 全部`), NEVER delete immediately: return `action="confirm_clear_all"` (`build_clear_all_confirm_flex_bubble`) with `/確認清空監控` and `/取消清空監控` buttons, and keep enterprise binding (`多租戶權限表`) untouched upon confirmation.
 2. **Compound Auto-Subscribe + Configure**:
    - When a user says `幫我把前金成功場列入監控，車位少於 8 格通知我` (or sets thresholds on a valid candidate station while simultaneously requesting monitoring), subscribe the station first (within quota) and immediately apply the requested `space_lower`/`space_upper` and/or `cooldown_hours`.
+3. **Group Smart Silent Gate (`is_group=True` & Multi-Group Isolation)**:
+   - Use `group_id` (`C...`) or `room_id` (`R...`) as the tenant binding & subscription target in group chats so multiple groups can bind different enterprise auth codes without colliding.
+   - In unbound groups, return `action="silent_ignore"` on casual chat; only return `auth_success` on a valid auth code or `auth_required` on `/` commands / `綁定|授權碼` keywords.
+   - In bound groups, filter out bare single-word human chat (`?`, `說明`, `查一下`, `換公司`, bare numbers without monitoring context), gate Track 2 (`parse_with_gemini`) behind `NLPService.is_potential_group_command`, and return `action="silent_ignore"` whenever no management intent matches.
+   - Account for group push billing via `LineService.get_target_push_cost(target_id)` when incrementing monthly push count.
 
 ---
 

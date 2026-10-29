@@ -65,13 +65,31 @@ if line_service.handler:
 
         @line_service.handler.add(MessageEvent, message=TextMessageContent)
         def handle_line_text_message(event):
-            user_id = getattr(event.source, "user_id", "UNKNOWN")
+            sender_user_id = getattr(event.source, "user_id", "UNKNOWN")
+            group_id = getattr(event.source, "group_id", None) or getattr(event.source, "room_id", None)
+            source_type = getattr(event.source, "type", "user")
+            is_group = bool(group_id or source_type in ("group", "room"))
+            user_id = group_id if is_group and group_id else sender_user_id
+
             text = str(event.message.text or "").strip()
             reply_token = event.reply_token
 
-            logger.info(f"Received LINE message from {user_id}: '{text}'")
-            cmd_res = TenantService.parse_and_execute_command(user_id, text, sheets_service)
+            logger.info(
+                f"Received LINE message (source={source_type}, target={user_id}, sender={sender_user_id}): '{text}'"
+            )
+            cmd_res = TenantService.parse_and_execute_command(
+                user_id,
+                text,
+                sheets_service,
+                is_group=is_group,
+                sender_user_id=sender_user_id,
+            )
             action = cmd_res.get("action")
+
+            # 0. 群組智慧靜默閘門：非管理設定／新增刪除意圖的一般群組閒聊，保持 100% 靜默不回覆
+            if action == "silent_ignore":
+                logger.info(f"Group smart silent gate: ignored casual message in {user_id}")
+                return
 
             # 1. 尚未授權 -> 提示輸入企業授權碼
             if action == "auth_required":
@@ -175,6 +193,16 @@ if line_service.handler:
                     footer_buttons=quick_nav_buttons,
                 )
                 line_service.reply_flex(reply_token, bubble, alt_text=cmd_res.get("title", "批次操作結果"))
+
+            # 5.6 清空全部監控場站之防呆二次確認卡片 (選項 B)
+            elif action == "confirm_clear_all":
+                bubble = line_service.build_clear_all_confirm_flex_bubble(
+                    company_name=cmd_res.get("company_name", "微程式"),
+                    stations=cmd_res.get("stations", []),
+                    current_count=cmd_res.get("current_count", 0),
+                    max_count=cmd_res.get("max_count", 10),
+                )
+                line_service.reply_flex(reply_token, bubble, alt_text="⚠️ 確認清空全部監控場站？")
 
             # 6. 教學手冊 /?
             elif action == "help":
@@ -415,12 +443,14 @@ async def trigger_anomaly_notification(
             if success:
                 dispatched_count += 1
                 dispatched_uids.add(uid)
+                push_cost = line_service.get_target_push_cost(uid)
                 delivery_reports.append({
                     "line_user_id": uid,
                     "company_name": cname,
-                    "anomalies_count": len(role_anomalies)
+                    "anomalies_count": len(role_anomalies),
+                    "push_quota_cost": push_cost,
                 })
-                new_count, just_reached = sheets_service.increment_monthly_push_count(1)
+                new_count, just_reached = sheets_service.increment_monthly_push_count(push_cost)
                 if just_reached:
                     super_uids = sheets_service.fetch_super_admin_user_ids()
                     warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)
@@ -456,7 +486,8 @@ async def trigger_anomaly_notification(
                 success = line_service.send_role_anomaly_alert(uid, cname, role_name, role_anomalies)
                 if success:
                     dispatched_count += 1
-                    new_count, just_reached = sheets_service.increment_monthly_push_count(1)
+                    push_cost = line_service.get_target_push_cost(uid)
+                    new_count, just_reached = sheets_service.increment_monthly_push_count(push_cost)
                     if just_reached:
                         super_uids = sheets_service.fetch_super_admin_user_ids()
                         warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)

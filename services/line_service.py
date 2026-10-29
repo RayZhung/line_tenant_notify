@@ -215,7 +215,7 @@ class LineService:
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"您的 LINE User ID:\n{user_id}",
+                        "text": f"{'本群組 LINE Group ID' if str(user_id).strip().startswith(('C', 'R')) else '您的 LINE User ID'}:\n{user_id}",
                         "size": "xxs",
                         "color": "#94A3B8",
                         "align": "center",
@@ -747,7 +747,7 @@ class LineService:
                         },
                         {
                             "type": "text",
-                            "text": f"您的 LINE User ID:\n{user_id}",
+                            "text": f"{'本群組 LINE Group ID' if str(user_id).strip().startswith(('C', 'R')) else '您的 LINE User ID'}:\n{user_id}",
                             "size": "xxs",
                             "color": "#94A3B8",
                             "align": "center",
@@ -989,7 +989,7 @@ class LineService:
                     },
                     {
                         "type": "text",
-                        "text": f"您的 LINE User ID:\n{user_id}",
+                        "text": f"{'本群組 LINE Group ID' if str(user_id).strip().startswith(('C', 'R')) else '您的 LINE User ID'}:\n{user_id}",
                         "size": "xxs",
                         "color": "#94A3B8",
                         "align": "center",
@@ -1398,6 +1398,118 @@ class LineService:
         return bubble
 
     @staticmethod
+    def build_clear_all_confirm_flex_bubble(
+        company_name: str,
+        stations: List[str],
+        current_count: int,
+        max_count: int = 10
+    ) -> Dict[str, Any]:
+        """
+        建構「清空全部監控場站」防呆二次確認 Flex 卡片 (選項 B：保護已設定門檻不被誤觸刪除)
+        """
+        station_list_text = "\n".join([f"• {s}" for s in stations[:25]])
+        if len(stations) > 25:
+            station_list_text += f"\n…等共 {len(stations)} 座場站"
+
+        return {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#D97706",
+                "paddingAll": "14px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "⚠️ 確認清空全部監控場站？",
+                        "weight": "bold",
+                        "color": "#FFFFFF",
+                        "size": "md"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"🏢 企業: {company_name} ｜ 即將清空: {current_count} / {max_count} 座場站",
+                        "color": "#FEF3C7",
+                        "size": "xxs",
+                        "margin": "xs",
+                        "weight": "bold",
+                        "wrap": True
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "此操作將移除您目前自選的所有監控場站與各場自訂門檻（您的企業綁定身份會安全保留）：",
+                        "size": "xs",
+                        "color": "#334155",
+                        "wrap": True
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "sm",
+                        "paddingAll": "10px",
+                        "backgroundColor": "#FFFBEB",
+                        "cornerRadius": "6px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": station_list_text or "（無場站）",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#92400E",
+                                "wrap": True
+                            }
+                        ]
+                    },
+                    {
+                        "type": "text",
+                        "text": "💡 若確定要全部清空，請點擊下方紅色按鈕；若按錯請點「取消」。",
+                        "size": "xxs",
+                        "color": "#64748B",
+                        "margin": "sm",
+                        "wrap": True
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "xs",
+                "paddingAll": "10px",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#DC2626",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "⚠️ 確定清空全部監控",
+                            "text": "/確認清空監控"
+                        }
+                    },
+                    {
+                        "type": "button",
+                        "style": "secondary",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "✖️ 取消（保留目前設定）",
+                            "text": "/取消清空監控"
+                        }
+                    }
+                ]
+            }
+        }
+
+    @staticmethod
     def build_role_anomaly_flex_bubble(
         company_name: str, 
         role_name: str, 
@@ -1802,6 +1914,36 @@ class LineService:
             }
         }
         return bubble
+
+    def get_target_push_cost(self, target_id: str) -> int:
+        """
+        計算單次主動 Push 推播消耗的 LINE 官方免費額度則數：
+        - 個人 1 對 1 (U...): 消耗 1 則
+        - 群組 (C...) / 多人聊天室 (R...): 依 LINE 官方計費規則消耗「群組內成員人數」則數
+        """
+        clean_target = str(target_id or "").strip()
+        if not clean_target.startswith(("C", "R")):
+            return 1
+        if not self.channel_access_token:
+            return 1
+
+        try:
+            if LINE_SDK_AVAILABLE is True and self.messaging_api:
+                if clean_target.startswith("C"):
+                    resp = self.messaging_api.get_group_member_count(clean_target)
+                else:
+                    resp = self.messaging_api.get_room_member_count(clean_target)
+                cnt = int(getattr(resp, "count", 1) or 1)
+                return max(1, cnt)
+            elif LINE_SDK_AVAILABLE == "v2" and hasattr(self, "line_bot_api"):
+                if clean_target.startswith("C"):
+                    cnt = int(self.line_bot_api.get_group_members_count(clean_target) or 1)
+                else:
+                    cnt = int(self.line_bot_api.get_room_members_count(clean_target) or 1)
+                return max(1, cnt)
+        except Exception as e:
+            logger.warning(f"Failed to query member count for {clean_target}, defaulting push cost to 1: {e}")
+        return 1
 
     def push_flex(self, user_id: str, flex_dict: Dict[str, Any], alt_text: str = "系統重要通知") -> bool:
         """

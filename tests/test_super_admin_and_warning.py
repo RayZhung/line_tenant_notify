@@ -495,7 +495,222 @@ def test_dual_track_nlu_and_multi_station():
         )
         assert res_t2["intent"] == "add_subscription" and res_t2["stations"] == ["板橋文化場"]
         mock_gem.assert_called_once()
-    print("  [PASS] 第 2 軌 Gemini Interactions API 結構化備援自動觸發與解析驗證通過")
+    # 9. 重現使用者截圖同音字與連接詞：「設定樹林俊興廠的車位門檻下線為5上限為15」
+    r9 = TenantService.parse_and_execute_command("U_RAY", "設定樹林俊興廠的車位門檻下線為5上限為15", mock_sheets)
+    assert r9["action"] == "space_update" and r9["result"]["success"] is True
+    assert r9["result"]["station_name"] == "樹林俊興場"
+    assert r9["result"]["lower"] == "5" and r9["result"]["upper"] == "15", f"Got: {r9['result']}"
+    print("  [PASS] 同音字與連接詞容錯：『設定樹林俊興廠的車位門檻下線為5上限為15』-> 精準設定 下限=5 / 上限=15")
+
+    # 10. 單獨修改上限時保留原下限、單獨取消上限時仍保留原下限
+    r10 = TenantService.parse_and_execute_command("U_RAY", "把樹林俊興場的車位上限改為 20", mock_sheets)
+    assert r10["action"] == "space_update" and r10["result"]["lower"] == "5" and r10["result"]["upper"] == "20"
+    r11 = TenantService.parse_and_execute_command("U_RAY", "把樹林俊興場的上限設為無", mock_sheets)
+    assert r11["action"] == "space_update" and r11["result"]["lower"] == "5" and r11["result"]["upper"] == "無"
+    print("  [PASS] 單項門檻局部修改保護：單獨改上限或單獨取消上限時，原下限 5 格安全保留不被清空")
+
+    # 11. 台灣時區 (UTC+8) 驗證
+    from services.sheets_service import _tw_now
+    tw_dt = _tw_now()
+    assert tw_dt.tzinfo is None
+    # 12. 選項 B 防呆確認清空流程：「解除全部的廠站監控」 -> 確認卡片 -> /取消清空監控 -> /確認清空監控
+    def _mock_clear_all(uid, company_id="1"):
+        removed = [f"[{s['station_code']}] {s['station_name']}" for s in live_subs]
+        live_subs.clear()
+        return {
+            "success": True,
+            "removed_stations": removed,
+            "removed_count": len(removed),
+            "remaining_count": 0,
+            "max_count": 10,
+        }
+    mock_sheets.clear_user_subscriptions.side_effect = _mock_clear_all
+
+    count_before = len(live_subs)
+    assert count_before > 0
+    r12_prompt = TenantService.parse_and_execute_command("U_RAY", "解除全部的廠站監控", mock_sheets)
+    assert r12_prompt["action"] == "confirm_clear_all"
+    assert r12_prompt["current_count"] == count_before
+    assert len(live_subs) == count_before, "防呆確認前絕不可提前刪除場站"
+
+    confirm_bubble = LineService.build_clear_all_confirm_flex_bubble(
+        r12_prompt["company_name"],
+        r12_prompt["stations"],
+        r12_prompt["current_count"],
+        r12_prompt["max_count"],
+    )
+    assert confirm_bubble["type"] == "bubble"
+
+    # 模擬先點擊「取消」-> 場站完全保留
+    r12_cancel = TenantService.parse_and_execute_command("U_RAY", "/取消清空監控", mock_sheets)
+    assert r12_cancel["action"] == "batch_operation" and len(live_subs) == count_before
+
+    # 模擬點擊紅色「確定清空全部監控」-> 場站一次歸零，且企業綁定不受影響
+    r12_exec = TenantService.parse_and_execute_command("U_RAY", "/確認清空監控", mock_sheets)
+    assert r12_exec["action"] == "batch_operation" and r12_exec["is_success"] is True
+    assert r12_exec["current_count"] == 0 and len(live_subs) == 0
+    mock_sheets.unbind_user.assert_not_called()
+    print(f"  [PASS] 選項 B 防呆清空全部監控驗證通過：『解除全部的廠站監控』先彈確認卡 -> 取消保留 -> 確認後一次清空 {count_before} 站且保留企業身份")
+
+
+def test_group_smart_silent_gate_and_multi_group_isolation():
+    print("\n=== 測試 7: 驗證群組智慧靜默閘門、雙群組獨立綁定與群組人數額度計算 ===")
+    from unittest.mock import patch
+    from services.nlp_service import NLPService
+    from services.line_service import LineService
+
+    # 模擬動態權限與雙群組獨立訂閱池 (C_GROUP_A 綁微程式、C_GROUP_B 綁乙企業)
+    perm_store = []
+    subs_by_target = {"C_GROUP_A": [], "C_GROUP_B": []}
+    auth_codes = {
+        "MOCK_AUTH_COMP1": {"company_id": "1", "company_name": "微程式"},
+        "MOCK_AUTH_COMP2": {"company_id": "2", "company_name": "合作營運商B"},
+    }
+    comp_candidates = {
+        "1": [
+            {"station_code": "01", "station_name": "松山撫遠場", "is_subscribed": False},
+            {"station_code": "05", "station_name": "樹林俊興場", "is_subscribed": False},
+        ],
+        "2": [
+            {"station_code": "01", "station_name": "高雄前鎮場", "is_subscribed": False},
+        ],
+    }
+
+    g_sheets = MagicMock()
+    g_sheets.last_error = None
+    g_sheets.fetch_tenant_permissions.side_effect = lambda: list(perm_store)
+    g_sheets.get_effective_max_stations.return_value = 10
+    g_sheets.fetch_candidate_sites.side_effect = lambda cid, uid: comp_candidates.get(str(cid), [])
+    g_sheets.fetch_user_subscriptions.side_effect = lambda uid: list(subs_by_target.get(uid, []))
+
+    def _bind(uid, code):
+        info = auth_codes.get(code.strip())
+        if not info:
+            return None
+        perm_store.append({
+            "company_id": info["company_id"],
+            "company_name": info["company_name"],
+            "role_name": "管理員",
+            "authorized_line_user_ids": uid,
+        })
+        return info
+
+    def _add_sub(uid, cid, query):
+        cands = comp_candidates.get(str(cid), [])
+        q = query.strip()
+        q_code = f"{int(q):02d}" if q.isdigit() else q
+        matched = next((c for c in cands if c["station_code"] == q_code or c["station_name"] == q or q in c["station_name"]), None)
+        if not matched:
+            return {"success": False, "error": f"找不到 {query}"}
+        subs_by_target.setdefault(uid, []).append({
+            "line_user_id": uid,
+            "company_id": str(cid),
+            "station_code": matched["station_code"],
+            "station_name": matched["station_name"],
+            "space_lower": "5",
+            "space_upper": "無",
+            "space_cooldown": "6",
+            "offline_cooldown": "24",
+        })
+        return {
+            "success": True,
+            "station_code": matched["station_code"],
+            "station_name": matched["station_name"],
+            "current_count": len(subs_by_target[uid]),
+            "max_count": 10,
+            "default_lower": "5",
+            "default_space_cooldown": "6",
+            "default_offline_cooldown": "24",
+        }
+
+    def _upd_space(line_user_id, station_query, lower, upper):
+        for s in subs_by_target.get(line_user_id, []):
+            if station_query in s["station_name"] or station_query == s["station_code"]:
+                s["space_lower"] = lower
+                s["space_upper"] = upper
+                return {"success": True, "station_name": s["station_name"], "lower": lower, "upper": upper, "updated_at": "2026-10-29 16:45:00"}
+        return {"success": False, "error": "未訂閱"}
+
+    g_sheets.bind_user_to_company.side_effect = _bind
+    g_sheets.add_user_subscription.side_effect = _add_sub
+    g_sheets.update_user_station_space.side_effect = _upd_space
+
+    # 1. 未綁定新群組日常閒聊 -> 100% 靜默 (silent_ignore)，絕不狂跳 auth_required
+    for casual in ["早安大家", "今天誰去巡場？", "?", "收到，謝謝！"]:
+        res_casual = TenantService.parse_and_execute_command("C_GROUP_A", casual, g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN")
+        assert res_casual["action"] == "silent_ignore", f"Unbound group should ignore '{casual}', got {res_casual}"
+
+    # 未綁定群組明確輸入 `/` 指令或詢問綁定 -> 才提示輸入授權碼
+    res_ask_bind = TenantService.parse_and_execute_command("C_GROUP_A", "/查詢", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN")
+    assert res_ask_bind["action"] == "auth_required"
+    auth_bubble = LineService.build_auth_request_flex_bubble("C_GROUP_A")
+    assert "本群組 LINE Group ID" in json.dumps(auth_bubble, ensure_ascii=False)
+    print("  [PASS] 未綁定群組安靜模式：日常對話 100% 靜默，僅在輸入 `/` 指令或詢問綁定時提示授權卡")
+
+    # 2. 同一人將機器人拉進兩個群組並啟用兩個不同企業授權碼 -> 完全隔離不衝突
+    b_a = TenantService.parse_and_execute_command("C_GROUP_A", "MOCK_AUTH_COMP1", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN")
+    b_b = TenantService.parse_and_execute_command("C_GROUP_B", "/綁定 MOCK_AUTH_COMP2", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN")
+    assert b_a["action"] == "auth_success" and b_a["company_name"] == "微程式"
+    assert b_b["action"] == "auth_success" and b_b["company_name"] == "合作營運商B"
+    print("  [PASS] 雙群組獨立綁定：同一人於 A 群綁『微程式』、B 群綁『合作營運商B』，以 Group ID 完全隔離不互蓋")
+
+    # 3. 已綁定群組內的人類日常對話（含問號、換公司、查一下、便當選哪些、刪數字）-> 100% 靜默且不呼叫 Gemini API
+    group_casual_phrases = [
+        "早安，今天排班表出來了嗎",
+        "?",
+        "？",
+        "說明",
+        "幫我查一下這台車的車牌",
+        "聽說老王換公司了",
+        "中午便當可以選哪些",
+        "把第 5 行刪掉",
+        "車位還有嗎",
+        "參數我改好了",
+    ]
+    with patch.object(NLPService, "parse_with_gemini") as mock_gemini:
+        for msg in group_casual_phrases:
+            r_ignore = TenantService.parse_and_execute_command(
+                "C_GROUP_A", msg, g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN"
+            )
+            assert r_ignore["action"] == "silent_ignore", f"Bound group should stay silent on '{msg}', got {r_ignore}"
+        mock_gemini.assert_not_called()
+    g_sheets.unbind_user.assert_not_called()
+    print("  [PASS] 已綁定群組抗誤觸閘門：10 種易混淆同事對話全部保持 100% 靜默，且零消耗 Gemini API")
+
+    # 4. 已綁定群組內的場站新增、門檻修改、清空確認與查詢指令 -> 精準回應且多群組場站互不干擾
+    g_add_a = TenantService.parse_and_execute_command(
+        "C_GROUP_A", "幫我把樹林俊興廠加入監控", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN"
+    )
+    assert g_add_a["action"] == "add_subscription" and g_add_a["result"]["success"] is True
+
+    g_space_a = TenantService.parse_and_execute_command(
+        "C_GROUP_A", "設定樹林俊興廠的車位門檻下線為5上限為15", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN"
+    )
+    assert g_space_a["action"] == "space_update" and g_space_a["result"]["lower"] == "5" and g_space_a["result"]["upper"] == "15"
+
+    g_clear_prompt = TenantService.parse_and_execute_command(
+        "C_GROUP_A", "解除全部的廠站監控", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN"
+    )
+    assert g_clear_prompt["action"] == "confirm_clear_all"
+
+    # B 群組同時新增專屬場站，確認 A/B 群組訂閱清單完全獨立
+    g_add_b = TenantService.parse_and_execute_command(
+        "C_GROUP_B", "幫我把高雄前鎮場列入監控", g_sheets, is_group=True, sender_user_id="U_SAME_ADMIN"
+    )
+    assert g_add_b["action"] == "add_subscription" and g_add_b["result"]["station_name"] == "高雄前鎮場"
+    assert [s["station_name"] for s in subs_by_target["C_GROUP_A"]] == ["樹林俊興場"]
+    assert [s["station_name"] for s in subs_by_target["C_GROUP_B"]] == ["高雄前鎮場"]
+    print("  [PASS] 群組管理意圖精準觸發：新增場站、改上下限、防呆清空全部皆正常回應，且 A/B 兩群組場站完全獨立")
+
+    # 5. 驗證群組主動推播額度按群組人數精準計費
+    ls = LineService()
+    ls.channel_access_token = "mock_token"
+    ls.messaging_api = MagicMock()
+    ls.messaging_api.get_group_member_count.return_value = MagicMock(count=8)
+    with patch("services.line_service.LINE_SDK_AVAILABLE", True):
+        assert ls.get_target_push_cost("U_SINGLE_USER") == 1
+        assert ls.get_target_push_cost("C_GROUP_A") == 8
+    print("  [PASS] 群組主動推播額度計費保護：個人推播計 1 則、8 人群組推播自動計 8 則，守護 195/200 瀕危門檻")
 
 
 if __name__ == "__main__":
@@ -505,4 +720,5 @@ if __name__ == "__main__":
     test_full_candidate_list_and_interactive_actions()
     test_mode_a_anomaly_and_anti_false_unbind()
     test_dual_track_nlu_and_multi_station()
+    test_group_smart_silent_gate_and_multi_group_isolation()
     print("\n🎉 全部單元與整合測試 100% 成功通過！")

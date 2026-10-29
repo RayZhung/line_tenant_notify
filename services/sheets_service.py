@@ -7,12 +7,18 @@ import time
 import json
 import base64
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("sheets_service")
+
+
+def _tw_now() -> datetime:
+    """取得台灣標準時間 (UTC+8)，避免 Vercel / GitHub Actions 顯示慢 8 小時的 UTC 時間"""
+    return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 try:
     import gspread
@@ -265,7 +271,7 @@ class SheetsService:
                     "error": f"找不到名稱包含「{station_query}」的所屬場站，請確認場站名稱是否正確。"
                 }
 
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
             # 更新 lower (col_low + 1), upper (col_up + 1), updated_at (col_upd + 1)
             ws.update_cell(target_row_idx, col_low + 1, str(lower))
             ws.update_cell(target_row_idx, col_up + 1, str(upper))
@@ -317,7 +323,7 @@ class SheetsService:
             col_upd = header.index("updated_at")
 
             cid_str = str(company_id).strip()
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
             updated_stations = []
             is_all = (station_query in ["全部", "ALL", "*", "所有"])
@@ -404,7 +410,7 @@ class SheetsService:
                 sh = self._open_spreadsheet(self.spreadsheet_id)
                 ws = sh.worksheet(self.sheet_name_cooldown)
                 all_values = ws.get_all_values()
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
                 existing_map = {}
                 row_count = len(all_values) if all_values else 1
@@ -737,7 +743,7 @@ class SheetsService:
         # 4. 寫入個人監控場站表並立即刷新快取
         try:
             from datetime import datetime
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
             def_low = str(configs.get("default_space_lower", "5"))
             def_s_cool = str(configs.get("default_space_cooldown", "6"))
             def_o_cool = str(configs.get("default_offline_cooldown", "24"))
@@ -861,6 +867,72 @@ class SheetsService:
             logger.error(f"Error removing user subscription: {e}")
             return {"success": False, "error": str(e)}
 
+    def clear_user_subscriptions(self, line_user_id: str, company_id: str = "1") -> Dict[str, Any]:
+        """
+        一次清空該使用者名下所有個人監控場站（僅操作「個人監控場站表」，完整保留「多租戶權限表」之企業綁定身份）
+        """
+        clean_uid = str(line_user_id).strip()
+        if not self.client or not self.spreadsheet_id:
+            return {"success": False, "error": "Sheets client not configured"}
+
+        try:
+            def _clear():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return []
+
+                header = [h.strip() for h in all_values[0]]
+                col_uid = header.index("line_user_id")
+                col_code = header.index("station_code") if "station_code" in header else -1
+                col_stn = header.index("station_name")
+
+                remaining_rows = [all_values[0]]
+                removed_labels: List[str] = []
+
+                for row in all_values[1:]:
+                    r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                    if r_uid == clean_uid:
+                        r_code_raw = str(row[col_code] if 0 <= col_code < len(row) else "").strip()
+                        r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                        r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                        removed_labels.append(f"[{r_code}] {r_stn}" if r_code else r_stn)
+                    else:
+                        remaining_rows.append(row)
+
+                if not removed_labels:
+                    return []
+
+                ws.clear()
+                col_letter = chr(64 + len(header)) if len(header) <= 26 else "J"
+                ws.update(
+                    range_name=f"A1:{col_letter}{len(remaining_rows)}",
+                    values=remaining_rows,
+                    value_input_option="RAW",
+                )
+                return removed_labels
+
+            removed_list = self._with_retry(_clear)
+            self._invalidate_cache("user_subs_all")
+            self._stale_cache.pop("user_subs_all", None)
+
+            if not removed_list:
+                return {"success": False, "error": "您目前尚未監控任何場站，無需執行清空。"}
+
+            effective_max = self.get_effective_max_stations(company_id)
+            logger.info(f"Cleared all {len(removed_list)} subscriptions for user {clean_uid}")
+            return {
+                "success": True,
+                "removed_stations": removed_list,
+                "removed_count": len(removed_list),
+                "remaining_count": 0,
+                "max_count": effective_max,
+            }
+        except Exception as e:
+            logger.error(f"Error clearing all user subscriptions: {e}")
+            return {"success": False, "error": str(e)}
+
     def update_user_station_space(
         self,
         line_user_id: str,
@@ -880,7 +952,7 @@ class SheetsService:
 
         try:
             from datetime import datetime
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
             def _update():
                 sh = self._open_spreadsheet(self.spreadsheet_id)
@@ -973,7 +1045,7 @@ class SheetsService:
 
         try:
             from datetime import datetime
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
             def _update():
                 sh = self._open_spreadsheet(self.spreadsheet_id)
@@ -1060,7 +1132,7 @@ class SheetsService:
 
             configs = dict(self._get_cached("system_configs", 20.0, _load))
 
-            cur_month = datetime.now().strftime("%Y-%m")
+            cur_month = _tw_now().strftime("%Y-%m")
             saved_month = configs.get("current_count_month", "")
             if saved_month and saved_month != cur_month:
                 logger.info(f"Month rollover detected ({saved_month} -> {cur_month}). Resetting monthly push counter to 0.")
@@ -1087,7 +1159,7 @@ class SheetsService:
             return False
         try:
             from datetime import datetime
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
             target_key = key.strip()
 
             def _write():

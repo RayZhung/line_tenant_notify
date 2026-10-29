@@ -17,7 +17,7 @@ import time
 import random
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -103,7 +103,7 @@ def check_site_status(site: Dict[str, Any], enterprises: Optional[Dict[str, str]
     account = str(site.get("帳號") or "appuser").strip()
     password = str(site.get("密碼") or "").strip()
     generation = str(site.get("世代") or "四代").strip()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
     if not raw_ip:
         return []
