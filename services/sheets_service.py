@@ -444,6 +444,56 @@ class SheetsService:
             logger.error(f"Error binding user to company: {e}")
             return ent_info
 
+    def unbind_user(self, line_user_id: str) -> bool:
+        """
+        解除使用者綁定 (方式 A 主動求助式):
+        1. 從「多租戶權限表」的所有列中移除該 line_user_id
+        2. 從「個人監控場站表」中清空該使用者的自選場站 (ISO27001 跨企業資料清理)
+        """
+        clean_uid = str(line_user_id).strip()
+        if not self.client or not self.spreadsheet_id:
+            return False
+
+        try:
+            sh = self.client.open_by_key(self.spreadsheet_id)
+
+            # 1. 清理「多租戶權限表」
+            ws_t = sh.worksheet(self.sheet_name_tenants)
+            t_values = ws_t.get_all_values()
+            if t_values and len(t_values) >= 2:
+                header = [h.strip() for h in t_values[0]]
+                if "authorized_line_user_ids" in header:
+                    col_uids = header.index("authorized_line_user_ids")
+                    for idx, row in enumerate(t_values[1:], start=2):
+                        current_uids = str(row[col_uids] if col_uids < len(row) else "").strip()
+                        uid_list = [u.strip() for u in current_uids.replace(";", ",").split(",") if u.strip()]
+                        if clean_uid in uid_list:
+                            uid_list.remove(clean_uid)
+                            ws_t.update_cell(idx, col_uids + 1, ",".join(uid_list))
+                            logger.info(f"Removed user {clean_uid} from row {idx} in {self.sheet_name_tenants}")
+
+            # 2. 清理「個人監控場站表」中該使用者的資料
+            ws_s = sh.worksheet(self.sheet_name_user_subs)
+            s_values = ws_s.get_all_values()
+            if s_values and len(s_values) >= 2:
+                s_header = [h.strip() for h in s_values[0]]
+                if "line_user_id" in s_header:
+                    col_uid = s_header.index("line_user_id")
+                    remaining_rows = [s_values[0]]  # 保留標題
+                    for row in s_values[1:]:
+                        r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                        if r_uid != clean_uid:
+                            remaining_rows.append(row)
+                    ws_s.clear()
+                    col_letter = chr(64 + len(s_header)) if len(s_header) <= 26 else "J"
+                    ws_s.update(range_name=f"A1:{col_letter}{len(remaining_rows)}", values=remaining_rows)
+                    logger.info(f"Cleared subscriptions for user {clean_uid}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error unbinding user {clean_uid}: {e}")
+            return False
+
     def fetch_candidate_sites(self, company_id: str, line_user_id: str) -> List[Dict[str, Any]]:
         """
         從車車戰情室主檔讀取該公司有權限的所有候選場站 (已依序號編列 [01]~[99])
@@ -924,7 +974,10 @@ class SheetsService:
         permissions = self.fetch_tenant_permissions()
         super_uids = []
         for p in permissions:
-            cid = str(p.get("company_id") or p.get("tenant_id") or "").strip()
+            cid_val = p.get("company_id")
+            if cid_val is None or str(cid_val).strip() == "":
+                cid_val = p.get("tenant_id", "")
+            cid = str(cid_val).strip()
             if cid in ["0", "ROOT"]:
                 raw_ids = str(p.get("authorized_line_user_ids", "")).replace(";", ",")
                 uids = [u.strip() for u in raw_ids.split(",") if u.strip()]

@@ -31,19 +31,27 @@ def test_flex_bubbles():
     assert mute_btn["action"]["text"] == "/靜音"
     print("  [PASS] 195 則瀕危告警 Flex 卡片結構驗證通過 (含一鍵靜音按鈕)")
 
-    # 2. 測試全域參數控制台卡片
-    configs = {
-        "max_stations_per_user": "12",
-        "maintenance_mode": "OFF",
-        "monthly_push_count": "150",
-        "monthly_push_warning": "195",
-        "current_count_month": "2026-10"
+    # 3. 測試 0 號超級管理者專屬指令手冊 (/? )
+    super_profile = {
+        "company_id": "0",
+        "company_name": "超級管理者",
+        "role_name": "系統超級管理者"
     }
-    bubble_cfg = LineService.build_system_configs_flex_bubble(configs)
-    assert bubble_cfg["type"] == "bubble"
-    assert "系統全域參數控制台" in bubble_cfg["header"]["contents"][0]["text"]
-    assert bubble_cfg["footer"]["contents"][0]["action"]["text"] == "/靜音"
-    print("  [PASS] 全域參數控制台 Flex 卡片結構驗證通過")
+    super_help_bubble = LineService.build_help_flex_bubble("U_super_user", super_profile)
+    assert "👑 系統超級管理者指令手冊" in super_help_bubble["header"]["contents"][0]["text"]
+    assert "/參數" in super_help_bubble["footer"]["contents"][0]["action"]["text"]
+    print("  [PASS] 超級管理者專屬 /? 指令手冊 Flex 卡片驗證通過")
+
+    # 4. 測試一般企業管理員指令手冊 (/? )
+    normal_profile = {
+        "company_id": "1",
+        "company_name": "微程式資訊",
+        "role_name": "設備運維 (甲)"
+    }
+    normal_help_bubble = LineService.build_help_flex_bubble("U_normal_user", normal_profile)
+    assert "📖 場站管理員指令手冊" in normal_help_bubble["header"]["contents"][0]["text"]
+    assert "重新綁定" in normal_help_bubble["body"]["contents"][-1]["contents"][1]["text"]
+    print("  [PASS] 一般管理員 /? 指令手冊驗證通過 (含 /重新綁定 指引)")
 
 def test_tenant_service_super_admin_commands():
     print("\n=== 測試 2: 驗證超級管理者指令權限與解析 ===")
@@ -131,7 +139,15 @@ def test_tenant_service_super_admin_commands():
     assert res_super_update_cfg["target_key"] == "max_stations_per_user"
     assert res_super_update_cfg["target_value"] == "15"
     mock_sheets.update_system_config.assert_called_with("max_stations_per_user", "15")
-    print("  [PASS] 超級管理者修改參數 (/參數 最大場站數 15) 成功寫入")
+    # 6. 測試 /重新綁定 指令 (主動求助式)
+    res_rebind = TenantService.parse_and_execute_command(
+        user_id="U_super_user",
+        text="/重新綁定",
+        sheets_service=mock_sheets
+    )
+    assert res_rebind["action"] == "auth_required"
+    mock_sheets.unbind_user.assert_called_with("U_super_user")
+    print("  [PASS] /重新綁定 指令成功解綁並返回 auth_required 要求新授權碼")
 
 def test_monthly_warning_counter_logic():
     print("\n=== 測試 3: 驗證推播累加與 195 門檻判定邏輯 ===")

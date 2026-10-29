@@ -23,6 +23,17 @@ CATEGORY_MAP = {
 
 class TenantService:
     @staticmethod
+    def _extract_company_id(obj: Dict[str, Any], keys: Tuple[str, ...] = ("company_id", "tenant_id", "授權企業")) -> str:
+        """
+        安全提取 company_id，避免整數 0 被 or 判斷為 False 而轉成空字串
+        """
+        for k in keys:
+            v = obj.get(k)
+            if v is not None and str(v).strip() != "":
+                return str(v).strip()
+        return ""
+
+    @staticmethod
     def filter_anomalies(
         operations_data: List[Dict[str, Any]],
         alert_settings: Optional[List[Dict[str, Any]]] = None,
@@ -49,7 +60,7 @@ class TenantService:
             try:
                 station_name = str(row.get("station_name") or row.get("停車場名稱") or "未知場站").strip()
                 station_ip = str(row.get("station_ip") or row.get("IP位址") or row.get("IP") or "-").strip()
-                company_id = str(row.get("company_id") or row.get("tenant_id") or row.get("授權企業") or "").strip()
+                company_id = TenantService._extract_company_id(row)
                 company_name = str(row.get("company_name") or row.get("公司名稱") or "").strip()
                 category = str(row.get("category") or "").strip().upper()
                 metric_name = str(row.get("metric_name") or "").strip()
@@ -210,7 +221,7 @@ class TenantService:
         dispatch_plans = []
 
         for rule in tenant_permissions:
-            cid = str(rule.get("company_id") or rule.get("tenant_id") or "").strip()
+            cid = TenantService._extract_company_id(rule)
             cname = str(rule.get("company_name") or rule.get("tenant_name") or cid).strip()
             role_name = str(rule.get("role_name") or "管理員").strip()
 
@@ -262,7 +273,7 @@ class TenantService:
             uids = [u.strip() for u in raw_ids.split(",") if u.strip()]
             if clean_uid in uids:
                 return {
-                    "company_id": str(rule.get("company_id") or rule.get("tenant_id") or "").strip(),
+                    "company_id": TenantService._extract_company_id(rule),
                     "company_name": str(rule.get("company_name") or rule.get("tenant_name") or "").strip(),
                     "role_name": str(rule.get("role_name") or "管理員").strip(),
                     "authorized_line_user_ids": uids
@@ -307,6 +318,15 @@ class TenantService:
         # ----------------------------------------------------
         company_id = profile["company_id"]
         company_name = profile["company_name"]
+
+        # (0) 重新綁定企業授權碼 /重新綁定 (方式 A 主動求助式)
+        if raw_cmd in ["/重新綁定", "重新綁定", "/切換身分", "切換身分", "/重新輸入", "重新輸入", "/換企業", "/rebind"]:
+            sheets_service.unbind_user(user_id)
+            return {
+                "action": "auth_required",
+                "user_id": user_id,
+                "text": raw_cmd
+            }
 
         # (1) 教學手冊 /?
         if raw_cmd in ["/?", "/help", "help", "?", "說明", "功能"]:

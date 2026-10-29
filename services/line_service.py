@@ -345,6 +345,17 @@ class LineService:
                 ]
             })
 
+        if len(candidates) > 15:
+            rows.append({
+                "type": "text",
+                "text": f"（共可選 {len(candidates)} 座場站，顯示前 15 座。亦可直接輸入「/新增 場站名稱」加入其他場站）",
+                "size": "xxs",
+                "color": "#94A3B8",
+                "align": "center",
+                "margin": "md",
+                "wrap": True
+            })
+
         bubble = {
             "type": "bubble",
             "size": "mega",
@@ -407,11 +418,213 @@ class LineService:
     @staticmethod
     def build_help_flex_bubble(user_id: str, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        建構 /? 指令教學手冊 Flex Message 卡片
+        建構 /? 指令教學手冊 Flex Message 卡片 (依身分區分超級管理者與一般企業管理員)
         """
         company_name = profile.get("company_name", "未授權企業") if profile else "未授權企業"
         role_name = profile.get("role_name", "訪客") if profile else "訪客"
+        cid = str(profile.get("company_id", "")).strip() if profile else ""
+        is_super = (cid in ["0", "ROOT"] or "超級" in role_name or "超級" in company_name)
 
+        if is_super:
+            # ----------------------------------------------------
+            # 👑 超級管理者專屬手冊 (最高權限黑金配色)
+            # ----------------------------------------------------
+            return {
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#0F172A",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "👑 系統超級管理者指令手冊",
+                            "weight": "bold",
+                            "color": "#FBBF24",
+                            "size": "lg"
+                        },
+                        {
+                            "type": "text",
+                            "text": "🏢 身份: 全域超級管理者 ｜ 權限: 跨企業最高控制權",
+                            "color": "#94A3B8",
+                            "size": "xs",
+                            "margin": "xs",
+                            "weight": "bold"
+                        }
+                    ]
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "16px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "您具備最高控制權，可管理全域參數並巡檢全台所有場站：",
+                            "size": "xs",
+                            "color": "#475569",
+                            "wrap": True
+                        },
+                        {"type": "separator", "margin": "sm"},
+                        # 區塊 1: 全域參數與防超支
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "margin": "md",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "1️⃣ 👑 全域參數控制 (最高權限)",
+                                    "weight": "bold",
+                                    "size": "sm",
+                                    "color": "#DC2626"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "👉 /參數：開啟全域參數控制台 (推播用量/門檻/上限)\n👉 /參數 [名稱] [數值]：修改參數 (例：/參數 最大場站數 15)\n👉 /靜音：緊急啟動全系統靜音 (凍結推播防超支)\n👉 /解除靜音：解除靜音 (恢復常態異常推播)",
+                                    "size": "xs",
+                                    "color": "#DC2626",
+                                    "weight": "bold",
+                                    "margin": "xs",
+                                    "wrap": True
+                                }
+                            ]
+                        },
+                        {"type": "separator", "margin": "sm"},
+                        # 區塊 2: 場站自選與巡檢
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "margin": "md",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "2️⃣ 🏢 全台場站巡檢 (98+ 座場站)",
+                                    "weight": "bold",
+                                    "size": "sm",
+                                    "color": "#0F172A"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "👉 /可選場站：列出全台所有候選場站\n👉 /新增 [代號或名稱]：加入個人自選監控\n👉 /移除 [代號或名稱]：取消監控 (釋出名額)\n👉 /查詢 或 /設定：查看自選監控與門檻\n👉 /車位 [場站] [下限] [上限]：車位雙向門檻\n   • 例：/車位 01 5 30 (低於5格或高於30格警報)\n   • 例：/車位 01 5 無 (僅設下限5格，上限不限)\n   • 例：/車位 01 無 50 (僅設上限50格，下限不限)\n   • 例：/車位 01 關閉 (停用該場車位警報)\n👉 /冷卻 [場站或全部] [車位|斷線] [時數]：防洗版間隔 (6/12/18/24/36h)",
+                                    "size": "xs",
+                                    "color": "#2563EB",
+                                    "weight": "bold",
+                                    "margin": "xs",
+                                    "wrap": True
+                                }
+                            ]
+                        },
+                        {"type": "separator", "margin": "sm"},
+                        # 區塊 3: 雙軌 AI 自然語言口語對話
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "margin": "md",
+                            "backgroundColor": "#F8FAFC",
+                            "paddingAll": "10px",
+                            "cornerRadius": "6px",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "🗣️ 支援自然語言口語對話 (免記指令)",
+                                    "weight": "bold",
+                                    "size": "xs",
+                                    "color": "#0F172A"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "直接打字也能理解，口語範例：\n•「幫我把撫遠場車位少於 5 個時警報」\n•「安和站車位剩不到 10 格提醒，上限設 40」\n•「撫遠場斷線先靜音 18 小時」\n•「安和站車位警報安靜半天」\n•「查一下我目前有哪些場站」",
+                                    "size": "xxs",
+                                    "color": "#475569",
+                                    "margin": "xs",
+                                    "wrap": True
+                                }
+                            ]
+                        },
+                        {"type": "separator", "margin": "sm"},
+                        # 區塊 4: 身分管理
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "margin": "md",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "4️⃣ 🔄 身分管理與切換",
+                                    "weight": "bold",
+                                    "size": "sm",
+                                    "color": "#0F172A"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "👉 /重新綁定 或 /切換身分：解除目前綁定，重新輸入企業授權碼",
+                                    "size": "xs",
+                                    "color": "#64748B",
+                                    "weight": "bold",
+                                    "margin": "xs",
+                                    "wrap": True
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "xs",
+                    "paddingAll": "12px",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#DC2626",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "⚙️ 系統全域參數控制台",
+                                "text": "/參數"
+                            }
+                        },
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#0284C7",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "🏢 瀏覽可選場站清單",
+                                "text": "/可選場站"
+                            }
+                        },
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "📋 查詢我的監控清單",
+                                "text": "/查詢"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": f"您的 LINE User ID:\n{user_id}",
+                            "size": "xxs",
+                            "color": "#94A3B8",
+                            "align": "center",
+                            "margin": "xs",
+                            "wrap": True
+                        }
+                    ]
+                }
+            }
+
+        # ----------------------------------------------------
+        # 🏢 一般企業管理員指令手冊
+        # ----------------------------------------------------
         bubble = {
             "type": "bubble",
             "size": "mega",
@@ -507,7 +720,7 @@ class LineService:
                         ]
                     },
                     {"type": "separator", "margin": "sm"},
-                    # 指令 2: 車位門檻
+                    # 指令 3: 車位門檻
                     {
                         "type": "box",
                         "layout": "vertical",
@@ -515,7 +728,7 @@ class LineService:
                         "contents": [
                             {
                                 "type": "text",
-                                "text": "2️⃣ 車位警報門檻設定",
+                                "text": "3️⃣ 車位雙向警報門檻設定 (支援下限與上限)",
                                 "weight": "bold",
                                 "size": "sm",
                                 "color": "#0F172A"
@@ -530,7 +743,7 @@ class LineService:
                             },
                             {
                                 "type": "text",
-                                "text": "• 例：/車位 復興場 5 30 (低於5格或高於30格警報)\n• 例：/車位 復興場 5 無 (僅設下限5格，上限不設)\n• 例：/車位 復興場 關閉 (停用該場車位警報)",
+                                "text": "• 例：/車位 復興場 5 30 (低於5格或高於30格警報)\n• 例：/車位 復興場 5 無 (僅設下限5格，上限不限)\n• 例：/車位 復興場 無 50 (僅設上限50格，下限不限)\n• 例：/車位 復興場 關閉 (停用該場車位警報)",
                                 "size": "xxs",
                                 "color": "#64748B",
                                 "wrap": True
@@ -538,6 +751,7 @@ class LineService:
                         ]
                     },
                     {"type": "separator", "margin": "sm"},
+                    # 指令 4: 冷卻時間
                     {
                         "type": "box",
                         "layout": "vertical",
@@ -563,6 +777,58 @@ class LineService:
                                 "text": "支援時數：6, 12, 18, 24, 36 小時\n預設值：車位 6 小時、斷線 24 小時\n• 例：/冷卻 復興場 車位 12\n• 例：/冷卻 全部 斷線 36",
                                 "size": "xxs",
                                 "color": "#64748B",
+                                "wrap": True
+                            }
+                        ]
+                    },
+                    {"type": "separator", "margin": "sm"},
+                    # 指令 5: 自然語言口語支援
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "backgroundColor": "#F8FAFC",
+                        "paddingAll": "10px",
+                        "cornerRadius": "6px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "🗣️ 支援自然語言口語對話 (免記指令)",
+                                "weight": "bold",
+                                "size": "xs",
+                                "color": "#0F172A"
+                            },
+                            {
+                                "type": "text",
+                                "text": "直接打字也能理解，口語範例：\n•「幫我把撫遠場車位少於 5 個時警報」\n•「安和站車位剩不到 10 格提醒，上限設 40」\n•「撫遠場斷線先靜音 18 小時」\n•「安和站車位警報安靜半天」\n•「查一下我目前有哪些場站」",
+                                "size": "xxs",
+                                "color": "#475569",
+                                "margin": "xs",
+                                "wrap": True
+                            }
+                        ]
+                    },
+                    {"type": "separator", "margin": "sm"},
+                    # 指令 6: 身分管理
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "6️⃣ 🔄 身分管理與切換",
+                                "weight": "bold",
+                                "size": "sm",
+                                "color": "#0F172A"
+                            },
+                            {
+                                "type": "text",
+                                "text": "👉 /重新綁定 或 /切換身分：解除目前綁定，重新輸入企業授權碼",
+                                "size": "xs",
+                                "color": "#64748B",
+                                "weight": "bold",
+                                "margin": "xs",
                                 "wrap": True
                             }
                         ]
