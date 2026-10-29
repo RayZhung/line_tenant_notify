@@ -3,10 +3,11 @@ Google Sheets API 資料服務模組
 遵循 ISO27001 資安規範：透過 Base64 環境變數或安全憑證檔案載入 Service Account 金鑰
 """
 import os
+import time
 import json
 import base64
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -68,6 +69,10 @@ class SheetsService:
         self.sheet_name_user_subs = os.getenv("SHEET_NAME_USER_SUBS", "個人監控場站表")
         self.sheet_name_config = os.getenv("SHEET_NAME_CONFIG", "系統全域參數")
         self.client = None
+        self._sh_cache: Dict[str, Any] = {}
+        self._cache: Dict[str, Tuple[float, Any]] = {}
+        self._stale_cache: Dict[str, Any] = {}
+        self.last_error: Optional[str] = None
         self._init_client()
 
     def _init_client(self):
@@ -75,59 +80,106 @@ class SheetsService:
         if creds and GSPREAD_AVAILABLE:
             try:
                 self.client = gspread.authorize(creds)
+                self._sh_cache.clear()
                 logger.info("Successfully authorized with Google Sheets API.")
             except Exception as e:
                 logger.error(f"gspread authorization failed: {e}")
 
+    def _open_spreadsheet(self, sheet_id: str) -> Any:
+        """
+        複用 Spreadsheet 控點，大幅降低每次操作重複查詢試算表 Metadata 的 Read Quota 消耗
+        """
+        if sheet_id not in self._sh_cache:
+            self._sh_cache[sheet_id] = self.client.open_by_key(sheet_id)
+        return self._sh_cache[sheet_id]
+
+    def _with_retry(self, fn: Callable[[], Any], retries: int = 3) -> Any:
+        """
+        自動重連與防限流重試：解決 Vercel 休眠容器 Keep-Alive 斷線與瞬時 429 Quota 問題
+        """
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                res = fn()
+                self.last_error = None
+                return res
+            except Exception as e:
+                last_exc = e
+                err_str = str(e)
+                logger.warning(f"Google Sheets API call failed (attempt {attempt}/{retries}): {e}")
+                self._sh_cache.clear()
+                self._init_client()
+                if attempt < retries:
+                    wait_sec = 1.5 * attempt if "429" in err_str else 0.6 * attempt
+                    time.sleep(wait_sec)
+        self.last_error = str(last_exc) if last_exc else "Unknown Google Sheets error"
+        raise last_exc
+
+    def _get_cached(self, key: str, ttl_sec: float, loader_fn: Callable[[], Any]) -> Any:
+        """
+        短效記憶體快取：避免連續點擊按鈕時在數秒內重複讀取相同工作表而觸發 60 reads/min 限制；
+        若重試後仍失敗但有舊快取，優先退守舊快取防止誤判為未綁定。
+        """
+        now = time.time()
+        if key in self._cache:
+            ts, val = self._cache[key]
+            if now - ts < ttl_sec:
+                self.last_error = None
+                return val
+
+        try:
+            fresh_val = self._with_retry(loader_fn)
+            self._cache[key] = (now, fresh_val)
+            self._stale_cache[key] = fresh_val
+            return fresh_val
+        except Exception as e:
+            if key in self._stale_cache:
+                logger.warning(f"Serving stale cache for '{key}' due to Sheets API error: {e}")
+                self.last_error = None
+                return self._stale_cache[key]
+            raise
+
+    def _invalidate_cache(self, *keys: str):
+        for k in keys:
+            self._cache.pop(k, None)
+
     def fetch_operations_data(self) -> List[Dict[str, Any]]:
         """
         讀取最新場站營運數據
-        回傳欄位結構範例:
-        [
-          {"station_id": "STN_001", "station_name": "台北站", "metric_value": 4.5, "metric_name": "庫存水位", "threshold": 10.0, "status": "active"},
-          ...
-        ]
         """
         if not self.client or not self.spreadsheet_id:
             logger.warning("Sheets client not configured, cannot fetch operations data.")
             return []
 
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            worksheet = sh.worksheet(self.sheet_name_data)
-            records = worksheet.get_all_records()
-            clean_records = [{str(k).strip(): v for k, v in r.items()} for r in records]
-            return clean_records
+            def _load():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                worksheet = sh.worksheet(self.sheet_name_data)
+                records = worksheet.get_all_records()
+                return [{str(k).strip(): v for k, v in r.items()} for r in records]
+            return self._with_retry(_load)
         except Exception as e:
             logger.error(f"Error reading operations worksheet: {e}")
             return []
 
     def fetch_tenant_permissions(self) -> List[Dict[str, Any]]:
         """
-        讀取多租戶權限表
-        回傳結構:
-        [
-          {
-            "tenant_id": "TENANT_A",
-            "tenant_name": "安維智能營運部",
-            "authorized_line_user_ids": "U1234567890abcdef,U0987654321fedcba",
-            "notify_enabled": True
-          },
-          ...
-        ]
+        讀取多租戶權限表 (20 秒快取，綁定/解綁時立即刷新)
         """
         if not self.client or not self.spreadsheet_id:
             logger.warning("Sheets client not configured, cannot fetch tenant permissions.")
             return []
 
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            worksheet = sh.worksheet(self.sheet_name_tenants)
-            records = worksheet.get_all_records()
-            clean_records = [{str(k).strip(): v for k, v in r.items()} for r in records]
-            return clean_records
+            def _load():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                worksheet = sh.worksheet(self.sheet_name_tenants)
+                records = worksheet.get_all_records()
+                return [{str(k).strip(): v for k, v in r.items()} for r in records]
+            return self._get_cached("tenant_permissions", 20.0, _load)
         except Exception as e:
             logger.error(f"Error reading tenant permissions worksheet: {e}")
+            self.last_error = str(e)
             return []
 
     def fetch_alert_settings(self, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -307,24 +359,32 @@ class SheetsService:
     def fetch_cooldown_history(self) -> Dict[tuple, Any]:
         """
         讀取各場站各警報最後推播時間
-        回傳: { (station_name, alert_type): datetime_obj }
+        支援個人/租戶隔離鍵 (scope_id, station_name, alert_category) 與全域鍵 (station_name, alert_category)
         """
         if not self.client or not self.spreadsheet_id:
             return {}
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_cooldown)
-            records = ws.get_all_records()
+            def _load():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_cooldown)
+                return ws.get_all_records()
+
+            records = self._with_retry(_load)
             history = {}
             for r in records:
-                sname = str(r.get("station_name", "")).strip()
-                atype = str(r.get("alert_type", "")).strip().upper()
-                dt_str = str(r.get("last_triggered_at", "")).strip()
+                clean_r = {str(k).strip(): v for k, v in r.items()}
+                sname = str(clean_r.get("station_name", "")).strip()
+                scope_id = str(clean_r.get("company_id") or clean_r.get("line_user_id") or "").strip()
+                atype = str(clean_r.get("alert_category") or clean_r.get("alert_type") or "").strip().upper()
+                dt_str = str(clean_r.get("last_triggered_at", "")).strip()
                 if sname and atype and dt_str:
                     try:
                         dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                        history[(sname, atype)] = dt
+                        if scope_id:
+                            history[(scope_id, sname, atype)] = dt
+                        if not scope_id or scope_id == "GLOBAL":
+                            history[(sname, atype)] = dt
                     except Exception:
                         pass
             return history
@@ -334,70 +394,81 @@ class SheetsService:
 
     def record_alert_triggers(self, triggered_items: List[Dict[str, Any]]):
         """
-        記錄推播警報時間，用於冷卻判定
+        記錄推播警報時間至「最後警報紀錄」(對應 4 欄: station_name, company_id[或line_user_id], alert_category, last_triggered_at)
         """
         if not triggered_items or not self.client or not self.spreadsheet_id:
             return
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_cooldown)
-            all_values = ws.get_all_values()
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            def _write():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_cooldown)
+                all_values = ws.get_all_values()
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            existing_map = {}
-            if all_values and len(all_values) > 1:
-                for idx, row in enumerate(all_values[1:], start=2):
-                    if len(row) >= 2:
-                        existing_map[(row[0].strip(), row[1].strip().upper())] = idx
+                existing_map = {}
+                row_count = len(all_values) if all_values else 1
+                if all_values and len(all_values) > 1:
+                    for idx, row in enumerate(all_values[1:], start=2):
+                        if len(row) >= 3:
+                            existing_map[(row[1].strip(), row[0].strip(), row[2].strip().upper())] = idx
 
-            for item in triggered_items:
-                sname = str(item.get("station_name", "")).strip()
-                atype = str(item.get("category", "")).strip().upper()
-                if not sname or not atype:
-                    continue
+                for item in triggered_items:
+                    sname = str(item.get("station_name", "")).strip()
+                    scope_id = str(item.get("line_user_id") or item.get("company_id") or "GLOBAL").strip()
+                    atype = str(item.get("category", "")).strip().upper()
+                    if not sname or not atype:
+                        continue
 
-                if (sname, atype) in existing_map:
-                    row_idx = existing_map[(sname, atype)]
-                    ws.update_cell(row_idx, 3, now_str)
-                else:
-                    ws.append_row([sname, atype, now_str])
-                    existing_map[(sname, atype)] = len(all_values) + 1
+                    key = (scope_id, sname, atype)
+                    if key in existing_map:
+                        row_idx = existing_map[key]
+                        ws.update_cell(row_idx, 4, now_str)
+                    else:
+                        ws.append_row([sname, scope_id, atype, now_str], value_input_option="RAW")
+                        row_count += 1
+                        existing_map[key] = row_count
+
+            self._with_retry(_write)
             logger.info(f"Recorded {len(triggered_items)} alert timestamps into cooldown log.")
         except Exception as e:
             logger.error(f"Error recording alert triggers: {e}")
 
     def fetch_enterprise_auth_map(self) -> Dict[str, Dict[str, Any]]:
         """
-        讀取車車戰情室主檔「企業名單」，取得企業授權碼對照表
+        讀取車車戰情室主檔「企業名單」，取得企業授權碼對照表 (60 秒快取)
         從雲端主檔即時動態比對，落實 ISO27001 不寫死任何真實授權碼
         """
         if not self.client or not self.master_spreadsheet_id:
             logger.warning("Master sheets client not configured, cannot fetch enterprise auth map.")
             return {}
         try:
-            m_sh = self.client.open_by_key(self.master_spreadsheet_id)
-            ws = m_sh.worksheet("企業名單")
-            values = ws.get_all_values()
-            if not values or len(values) < 2:
-                return {}
+            def _load():
+                m_sh = self._open_spreadsheet(self.master_spreadsheet_id)
+                ws = m_sh.worksheet("企業名單")
+                values = ws.get_all_values()
+                if not values or len(values) < 2:
+                    return {}
 
-            auth_map = {}
-            for row in values[1:]:
-                if len(row) >= 3:
-                    cname = str(row[0]).strip()
-                    code = str(row[1]).strip()
-                    cid = str(row[2]).strip()
-                    if code:
-                        auth_map[code] = {"company_id": cid, "company_name": cname}
-            return auth_map
+                auth_map = {}
+                for row in values[1:]:
+                    if len(row) >= 3:
+                        cname = str(row[0]).strip()
+                        code = str(row[1]).strip()
+                        cid = str(row[2]).strip()
+                        if code:
+                            auth_map[code] = {"company_id": cid, "company_name": cname}
+                return auth_map
+
+            return self._get_cached("enterprise_auth_map", 60.0, _load)
         except Exception as e:
             logger.error(f"Error reading enterprise auth map: {e}")
+            self.last_error = str(e)
             return {}
 
     def bind_user_to_company(self, line_user_id: str, auth_code: str) -> Optional[Dict[str, Any]]:
         """
-        使用企業授權碼綁定使用者，寫入「多租戶權限表」
+        使用企業授權碼綁定使用者，寫入「多租戶權限表」並立即刷新權限快取
         """
         auth_map = self.fetch_enterprise_auth_map()
         clean_code = auth_code.strip()
@@ -412,33 +483,36 @@ class SheetsService:
             return ent_info
 
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_tenants)
-            all_values = ws.get_all_values()
-            if not all_values or len(all_values) < 2:
-                return ent_info
+            def _write():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_tenants)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return
 
-            header = [h.strip() for h in all_values[0]]
-            col_cid = header.index("company_id")
-            col_uids = header.index("authorized_line_user_ids")
+                header = [h.strip() for h in all_values[0]]
+                col_cid = header.index("company_id")
+                col_uids = header.index("authorized_line_user_ids")
 
-            user_added = False
-            for idx, row in enumerate(all_values[1:], start=2):
-                r_cid = str(row[col_cid] if col_cid < len(row) else "").strip()
-                if r_cid == target_cid:
-                    current_uids = str(row[col_uids] if col_uids < len(row) else "").strip()
-                    uid_list = [u.strip() for u in current_uids.replace(";", ",").split(",") if u.strip()]
-                    if line_user_id not in uid_list:
-                        uid_list.append(line_user_id)
-                        ws.update_cell(idx, col_uids + 1, ",".join(uid_list))
-                        logger.info(f"Bound user {line_user_id} to company {target_cname} ({target_cid})")
-                    user_added = True
-                    break
+                user_added = False
+                for idx, row in enumerate(all_values[1:], start=2):
+                    r_cid = str(row[col_cid] if col_cid < len(row) else "").strip()
+                    if r_cid == target_cid:
+                        current_uids = str(row[col_uids] if col_uids < len(row) else "").strip()
+                        uid_list = [u.strip() for u in current_uids.replace(";", ",").split(",") if u.strip()]
+                        if line_user_id not in uid_list:
+                            uid_list.append(line_user_id)
+                            ws.update_cell(idx, col_uids + 1, ",".join(uid_list))
+                            logger.info(f"Bound user {line_user_id} to company {target_cname} ({target_cid})")
+                        user_added = True
+                        break
 
-            if not user_added:
-                # 若無該公司列則新增一列
-                ws.append_row([target_cid, target_cname, "管理員 (甲+乙)", "ALL", line_user_id, "TRUE"])
+                if not user_added:
+                    ws.append_row([target_cid, target_cname, "管理員 (甲+乙)", "ALL", line_user_id, "TRUE"], value_input_option="RAW")
 
+            self._with_retry(_write)
+            self._invalidate_cache("tenant_permissions")
+            self._stale_cache.pop("tenant_permissions", None)
             return ent_info
         except Exception as e:
             logger.error(f"Error binding user to company: {e}")
@@ -455,44 +529,63 @@ class SheetsService:
             return False
 
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
+            def _write():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
 
-            # 1. 清理「多租戶權限表」
-            ws_t = sh.worksheet(self.sheet_name_tenants)
-            t_values = ws_t.get_all_values()
-            if t_values and len(t_values) >= 2:
-                header = [h.strip() for h in t_values[0]]
-                if "authorized_line_user_ids" in header:
-                    col_uids = header.index("authorized_line_user_ids")
-                    for idx, row in enumerate(t_values[1:], start=2):
-                        current_uids = str(row[col_uids] if col_uids < len(row) else "").strip()
-                        uid_list = [u.strip() for u in current_uids.replace(";", ",").split(",") if u.strip()]
-                        if clean_uid in uid_list:
-                            uid_list.remove(clean_uid)
-                            ws_t.update_cell(idx, col_uids + 1, ",".join(uid_list))
-                            logger.info(f"Removed user {clean_uid} from row {idx} in {self.sheet_name_tenants}")
+                # 1. 清理「多租戶權限表」
+                ws_t = sh.worksheet(self.sheet_name_tenants)
+                t_values = ws_t.get_all_values()
+                if t_values and len(t_values) >= 2:
+                    header = [h.strip() for h in t_values[0]]
+                    if "authorized_line_user_ids" in header:
+                        col_uids = header.index("authorized_line_user_ids")
+                        for idx, row in enumerate(t_values[1:], start=2):
+                            current_uids = str(row[col_uids] if col_uids < len(row) else "").strip()
+                            uid_list = [u.strip() for u in current_uids.replace(";", ",").split(",") if u.strip()]
+                            if clean_uid in uid_list:
+                                uid_list.remove(clean_uid)
+                                ws_t.update_cell(idx, col_uids + 1, ",".join(uid_list))
+                                logger.info(f"Removed user {clean_uid} from row {idx} in {self.sheet_name_tenants}")
 
-            # 2. 清理「個人監控場站表」中該使用者的資料
-            ws_s = sh.worksheet(self.sheet_name_user_subs)
-            s_values = ws_s.get_all_values()
-            if s_values and len(s_values) >= 2:
-                s_header = [h.strip() for h in s_values[0]]
-                if "line_user_id" in s_header:
-                    col_uid = s_header.index("line_user_id")
-                    remaining_rows = [s_values[0]]  # 保留標題
-                    for row in s_values[1:]:
-                        r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                        if r_uid != clean_uid:
-                            remaining_rows.append(row)
-                    ws_s.clear()
-                    col_letter = chr(64 + len(s_header)) if len(s_header) <= 26 else "J"
-                    ws_s.update(range_name=f"A1:{col_letter}{len(remaining_rows)}", values=remaining_rows)
-                    logger.info(f"Cleared subscriptions for user {clean_uid}")
+                # 2. 清理「個人監控場站表」中該使用者的資料
+                ws_s = sh.worksheet(self.sheet_name_user_subs)
+                s_values = ws_s.get_all_values()
+                if s_values and len(s_values) >= 2:
+                    s_header = [h.strip() for h in s_values[0]]
+                    if "line_user_id" in s_header:
+                        col_uid = s_header.index("line_user_id")
+                        remaining_rows = [s_values[0]]
+                        for row in s_values[1:]:
+                            r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                            if r_uid != clean_uid:
+                                remaining_rows.append(row)
+                        ws_s.clear()
+                        col_letter = chr(64 + len(s_header)) if len(s_header) <= 26 else "J"
+                        ws_s.update(
+                            range_name=f"A1:{col_letter}{len(remaining_rows)}",
+                            values=remaining_rows,
+                            value_input_option="RAW"
+                        )
+                        logger.info(f"Cleared subscriptions for user {clean_uid}")
 
+            self._with_retry(_write)
+            self._invalidate_cache("tenant_permissions", "user_subs_all")
+            self._stale_cache.pop("tenant_permissions", None)
+            self._stale_cache.pop("user_subs_all", None)
             return True
         except Exception as e:
             logger.error(f"Error unbinding user {clean_uid}: {e}")
             return False
+
+    def _fetch_master_site_list_raw(self) -> List[Dict[str, Any]]:
+        """
+        讀取主檔 site list 並快取 120 秒，避免連續新增場站時重複打爆 Master Sheet API
+        """
+        def _load():
+            m_sh = self._open_spreadsheet(self.master_spreadsheet_id)
+            ws = m_sh.worksheet("site list")
+            return ws.get_all_records()
+        return self._get_cached("master_site_list", 120.0, _load)
 
     def fetch_candidate_sites(self, company_id: str, line_user_id: str) -> List[Dict[str, Any]]:
         """
@@ -503,10 +596,7 @@ class SheetsService:
             return []
 
         try:
-            m_sh = self.client.open_by_key(self.master_spreadsheet_id)
-            ws = m_sh.worksheet("site list")
-            records = ws.get_all_records()
-
+            records = self._fetch_master_site_list_raw()
             user_subs = self.fetch_user_subscriptions(line_user_id)
             subscribed_names = set(s.get("station_name") for s in user_subs)
 
@@ -519,7 +609,6 @@ class SheetsService:
                 sip = str(r.get("IP位址") or r.get("IP") or "-").strip()
                 auth_str = str(r.get("授權企業") or "1").strip()
                 auth_cids = [c.strip() for c in auth_str.replace(" ", "").split(",") if c.strip()]
-                # 若為 '12' 包含 '1'
                 for ch in auth_str:
                     if ch.isdigit() and ch not in auth_cids:
                         auth_cids.append(ch)
@@ -537,13 +626,13 @@ class SheetsService:
                     "is_subscribed": (sname in subscribed_names)
                 })
 
-            # 編排 2 碼代號 01, 02...
             for idx, c in enumerate(candidate_list, start=1):
                 c["station_code"] = f"{idx:02d}"
 
             return candidate_list
         except Exception as e:
             logger.error(f"Error fetching candidate sites: {e}")
+            self.last_error = str(e)
             return []
 
     def get_effective_max_stations(self, company_id: str) -> int:
@@ -558,30 +647,38 @@ class SheetsService:
         except (ValueError, TypeError):
             return 10
 
-    def fetch_user_subscriptions(self, line_user_id: str) -> List[Dict[str, Any]]:
+    def fetch_all_user_subscriptions(self) -> List[Dict[str, Any]]:
         """
-        讀取該使用者在「個人監控場站表」中自選的場站
+        讀取所有使用者的個人監控清單 (5 秒快取，任何增刪改立即刷新)
         """
         if not self.client or not self.spreadsheet_id:
             return []
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
-            records = ws.get_all_records()
-            clean_records = [{str(k).strip(): v for k, v in r.items()} for r in records]
-
-            user_subs = []
-            clean_uid = str(line_user_id).strip()
-            for r in clean_records:
-                if str(r.get("line_user_id", "")).strip() == clean_uid:
-                    raw_c = str(r.get("station_code", "")).strip()
+            def _load():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                records = ws.get_all_records()
+                cleaned = []
+                for r in records:
+                    item = {str(k).strip(): v for k, v in r.items()}
+                    raw_c = str(item.get("station_code", "")).strip()
                     if raw_c.isdigit():
-                        r["station_code"] = f"{int(raw_c):02d}"
-                    user_subs.append(r)
-            return user_subs
+                        item["station_code"] = f"{int(raw_c):02d}"
+                    cleaned.append(item)
+                return cleaned
+            return self._get_cached("user_subs_all", 5.0, _load)
         except Exception as e:
-            logger.error(f"Error reading user subscriptions: {e}")
+            logger.error(f"Error fetching all subscriptions: {e}")
+            self.last_error = str(e)
             return []
+
+    def fetch_user_subscriptions(self, line_user_id: str) -> List[Dict[str, Any]]:
+        """
+        讀取該使用者在「個人監控場站表」中自選的場站
+        """
+        all_records = self.fetch_all_user_subscriptions()
+        clean_uid = str(line_user_id).strip()
+        return [dict(r) for r in all_records if str(r.get("line_user_id", "")).strip() == clean_uid]
 
     def add_user_subscription(
         self,
@@ -594,8 +691,10 @@ class SheetsService:
         """
         clean_uid = str(line_user_id).strip()
         current_subs = self.fetch_user_subscriptions(clean_uid)
+        if self.last_error:
+            return {"success": False, "error": "雲端試算表連線忙碌中，請稍候幾秒再點擊重試。"}
 
-        # 1. 取得全域上限與預設值
+        # 1. 取得全域上限與預設值 (走快取，0 額外讀取)
         configs = self.fetch_system_configs()
         effective_max = self.get_effective_max_stations(company_id)
 
@@ -605,12 +704,10 @@ class SheetsService:
                 "error": f"您目前已監控 {len(current_subs)} 座場站（已達上限 {effective_max} 座），請先移除不需要的場站後再新增。"
             }
 
-        # 2. 搜尋候選場站
+        # 2. 搜尋候選場站 (Master site list 走 120s 快取)
         candidates = self.fetch_candidate_sites(company_id, clean_uid)
         matched = None
         q = station_query.strip().lower()
-
-        # 支援純數字或 2 碼代號比對 (如 '1' -> '01')
         q_code = f"{int(q):02d}" if q.isdigit() else q
 
         for c in candidates:
@@ -637,13 +734,10 @@ class SheetsService:
                     "error": f"場站「{matched['station_name']}」已在您的監控清單中，無需重複新增。"
                 }
 
-        # 4. 寫入個人監控場站表
+        # 4. 寫入個人監控場站表並立即刷新快取
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             def_low = str(configs.get("default_space_lower", "5"))
             def_s_cool = str(configs.get("default_space_cooldown", "6"))
             def_o_cool = str(configs.get("default_offline_cooldown", "24"))
@@ -654,13 +748,22 @@ class SheetsService:
                 matched["station_code"],
                 matched["station_name"],
                 matched["station_ip"],
-                def_low,     # space_lower default
-                "無",        # space_upper default
-                def_s_cool,  # space_cooldown default
-                def_o_cool,  # offline_cooldown default
+                def_low,
+                "無",
+                def_s_cool,
+                def_o_cool,
                 now_str
             ]
-            ws.append_row(new_row, value_input_option="RAW")
+
+            def _write():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                ws.append_row(new_row, value_input_option="RAW")
+
+            self._with_retry(_write)
+            self._invalidate_cache("user_subs_all")
+            self._stale_cache.pop("user_subs_all", None)
+
             new_count = len(current_subs) + 1
             logger.info(f"Added subscription for user {clean_uid}: {matched['station_name']} (Total: {new_count}/{effective_max})")
             return {
@@ -676,7 +779,7 @@ class SheetsService:
             }
         except Exception as e:
             logger.error(f"Error adding user subscription: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": f"寫入失敗，請稍候重試 ({e})"}
 
     def remove_user_subscription(self, line_user_id: str, station_query: str, company_id: str = "1") -> Dict[str, Any]:
         """
@@ -690,54 +793,68 @@ class SheetsService:
             return {"success": False, "error": "Sheets client not configured"}
 
         try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
-            all_values = ws.get_all_values()
-            if not all_values or len(all_values) < 2:
-                return {"success": False, "error": "您目前尚未監控任何場站。"}
+            def _remove():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return None, 0
 
-            header = [h.strip() for h in all_values[0]]
-            col_uid = header.index("line_user_id")
-            col_code = header.index("station_code")
-            col_stn = header.index("station_name")
+                header = [h.strip() for h in all_values[0]]
+                col_uid = header.index("line_user_id")
+                col_code = header.index("station_code")
+                col_stn = header.index("station_name")
 
-            target_row_idx = None
-            removed_name = ""
+                target_row_idx = None
+                removed_name = ""
 
-            user_rows = []
-            for idx, row in enumerate(all_values[1:], start=2):
-                r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                if r_uid == clean_uid:
-                    r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
-                    r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
-                    r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
-                    user_rows.append((idx, r_code, r_stn))
+                user_rows = []
+                for idx, row in enumerate(all_values[1:], start=2):
+                    r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                    if r_uid == clean_uid:
+                        r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                        r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                        r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                        user_rows.append((idx, r_code, r_stn))
 
-            for idx, r_code, r_stn in user_rows:
-                if r_code == q_code or r_stn.lower() == q:
-                    target_row_idx = idx
-                    removed_name = r_stn
-                    break
-            if not target_row_idx and not q.isdigit():
+                if not user_rows:
+                    return "EMPTY", 0
+
                 for idx, r_code, r_stn in user_rows:
-                    if q in r_stn.lower():
+                    if r_code == q_code or r_stn.lower() == q:
                         target_row_idx = idx
                         removed_name = r_stn
                         break
+                if not target_row_idx and not q.isdigit():
+                    for idx, r_code, r_stn in user_rows:
+                        if q in r_stn.lower():
+                            target_row_idx = idx
+                            removed_name = r_stn
+                            break
 
-            if not target_row_idx:
+                if not target_row_idx:
+                    return None, len(user_rows)
+
+                ws.delete_rows(target_row_idx)
+                return removed_name, len(user_rows) - 1
+
+            removed_name, remaining_cnt = self._with_retry(_remove)
+            self._invalidate_cache("user_subs_all")
+            self._stale_cache.pop("user_subs_all", None)
+
+            if removed_name == "EMPTY":
+                return {"success": False, "error": "您目前尚未監控任何場站。"}
+            if not removed_name:
                 return {
                     "success": False,
                     "error": f"在您的個人監控清單中找不到「{station_query}」。請輸入 /查詢 查看您目前的監控場站。"
                 }
 
-            ws.delete_rows(target_row_idx)
-            current_subs = self.fetch_user_subscriptions(clean_uid)
             effective_max = self.get_effective_max_stations(company_id)
             return {
                 "success": True,
                 "station_name": removed_name,
-                "remaining_count": len(current_subs),
+                "remaining_count": remaining_cnt,
                 "max_count": effective_max
             }
         except Exception as e:
@@ -763,54 +880,64 @@ class SheetsService:
 
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
-            all_values = ws.get_all_values()
-            if not all_values or len(all_values) < 2:
-                return {"success": False, "error": "您尚未監控此場站。"}
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            header = [h.strip() for h in all_values[0]]
-            col_uid = header.index("line_user_id")
-            col_code = header.index("station_code")
-            col_stn = header.index("station_name")
-            col_low = header.index("space_lower")
-            col_up = header.index("space_upper")
-            col_upd = header.index("updated_at")
+            def _update():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return "EMPTY"
 
-            target_row_idx = None
-            matched_name = ""
+                header = [h.strip() for h in all_values[0]]
+                col_uid = header.index("line_user_id")
+                col_code = header.index("station_code")
+                col_stn = header.index("station_name")
+                col_low = header.index("space_lower")
+                col_up = header.index("space_upper")
+                col_upd = header.index("updated_at")
 
-            user_rows = []
-            for idx, row in enumerate(all_values[1:], start=2):
-                r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                if r_uid == clean_uid:
-                    r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
-                    r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
-                    r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
-                    user_rows.append((idx, r_code, r_stn))
+                target_row_idx = None
+                matched_name = ""
 
-            for idx, r_code, r_stn in user_rows:
-                if r_code == q_code or r_stn.lower() == q:
-                    target_row_idx = idx
-                    matched_name = r_stn
-                    break
-            if not target_row_idx and not q.isdigit():
+                user_rows = []
+                for idx, row in enumerate(all_values[1:], start=2):
+                    r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                    if r_uid == clean_uid:
+                        r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                        r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                        r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+                        user_rows.append((idx, r_code, r_stn))
+
                 for idx, r_code, r_stn in user_rows:
-                    if q in r_stn.lower():
+                    if r_code == q_code or r_stn.lower() == q:
                         target_row_idx = idx
                         matched_name = r_stn
                         break
+                if not target_row_idx and not q.isdigit():
+                    for idx, r_code, r_stn in user_rows:
+                        if q in r_stn.lower():
+                            target_row_idx = idx
+                            matched_name = r_stn
+                            break
 
-            if not target_row_idx:
+                if not target_row_idx:
+                    return None
+
+                ws.update_cell(target_row_idx, col_low + 1, str(lower))
+                ws.update_cell(target_row_idx, col_up + 1, str(upper))
+                ws.update_cell(target_row_idx, col_upd + 1, now_str)
+                return matched_name
+
+            matched_name = self._with_retry(_update)
+            self._invalidate_cache("user_subs_all")
+            self._stale_cache.pop("user_subs_all", None)
+
+            if matched_name == "EMPTY" or not matched_name:
                 return {
                     "success": False,
                     "error": f"在您的監控清單中找不到「{station_query}」。請先輸入 /新增 將其加入監控。"
                 }
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ws.update_cell(target_row_idx, col_low + 1, str(lower))
-            ws.update_cell(target_row_idx, col_up + 1, str(upper))
-            ws.update_cell(target_row_idx, col_upd + 1, now_str)
 
             return {
                 "success": True,
@@ -846,37 +973,45 @@ class SheetsService:
 
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
-            all_values = ws.get_all_values()
-            if not all_values or len(all_values) < 2:
-                return {"success": False, "error": "您目前尚未監控任何場站。"}
-
-            header = [h.strip() for h in all_values[0]]
-            col_uid = header.index("line_user_id")
-            col_code = header.index("station_code")
-            col_stn = header.index("station_name")
-            target_col_name = "space_cooldown" if "車位" in alert_type else "offline_cooldown"
-            col_cool = header.index(target_col_name)
-            col_upd = header.index("updated_at")
-
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            updated_stations = []
 
-            for idx, row in enumerate(all_values[1:], start=2):
-                r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
-                r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
-                r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
-                r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+            def _update():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_user_subs)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return "EMPTY"
 
-                if r_uid == clean_uid:
-                    if is_all or (r_code == q_code or q in r_stn.lower()):
-                        ws.update_cell(idx, col_cool + 1, str(hours))
-                        ws.update_cell(idx, col_upd + 1, now_str)
-                        updated_stations.append(r_stn)
-                        if not is_all:
-                            break
+                header = [h.strip() for h in all_values[0]]
+                col_uid = header.index("line_user_id")
+                col_code = header.index("station_code")
+                col_stn = header.index("station_name")
+                target_col_name = "space_cooldown" if "車位" in alert_type else "offline_cooldown"
+                col_cool = header.index(target_col_name)
+                col_upd = header.index("updated_at")
 
+                updated = []
+                for idx, row in enumerate(all_values[1:], start=2):
+                    r_uid = str(row[col_uid] if col_uid < len(row) else "").strip()
+                    r_code_raw = str(row[col_code] if col_code < len(row) else "").strip()
+                    r_code = f"{int(r_code_raw):02d}" if r_code_raw.isdigit() else r_code_raw
+                    r_stn = str(row[col_stn] if col_stn < len(row) else "").strip()
+
+                    if r_uid == clean_uid:
+                        if is_all or (r_code == q_code or r_stn.lower() == q or (not q.isdigit() and q in r_stn.lower())):
+                            ws.update_cell(idx, col_cool + 1, str(hours))
+                            ws.update_cell(idx, col_upd + 1, now_str)
+                            updated.append(r_stn)
+                            if not is_all:
+                                break
+                return updated
+
+            updated_stations = self._with_retry(_update)
+            self._invalidate_cache("user_subs_all")
+            self._stale_cache.pop("user_subs_all", None)
+
+            if updated_stations == "EMPTY":
+                return {"success": False, "error": "您目前尚未監控任何場站。"}
             if not updated_stations:
                 return {
                     "success": False,
@@ -895,24 +1030,9 @@ class SheetsService:
             logger.error(f"Error updating user cooldown: {e}")
             return {"success": False, "error": str(e)}
 
-    def fetch_all_user_subscriptions(self) -> List[Dict[str, Any]]:
-        """
-        讀取所有使用者的個人監控清單 (供巡檢推播時分派使用)
-        """
-        if not self.client or not self.spreadsheet_id:
-            return []
-        try:
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_user_subs)
-            records = ws.get_all_records()
-            return [{str(k).strip(): v for k, v in r.items()} for r in records]
-        except Exception as e:
-            logger.error(f"Error fetching all subscriptions: {e}")
-            return []
-
     def fetch_system_configs(self) -> Dict[str, str]:
         """
-        讀取「系統全域參數」分頁，支援換月自動將推播次數歸零
+        讀取「系統全域參數」分頁 (20 秒快取，修改參數時立即刷新)，支援換月自動將推播次數歸零
         """
         if not self.client or not self.spreadsheet_id:
             return {
@@ -926,17 +1046,20 @@ class SheetsService:
             }
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_config)
-            records = ws.get_all_records()
-            configs = {}
-            for r in records:
-                k = str(r.get("config_key") or "").strip()
-                v = str(r.get("config_value") or "").strip()
-                if k:
-                    configs[k] = v
+            def _load():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_config)
+                records = ws.get_all_records()
+                cfgs = {}
+                for r in records:
+                    k = str(r.get("config_key") or "").strip()
+                    v = str(r.get("config_value") or "").strip()
+                    if k:
+                        cfgs[k] = v
+                return cfgs
 
-            # 換月自動歸零檢查 (例如 2026-10 進入 2026-11)
+            configs = dict(self._get_cached("system_configs", 20.0, _load))
+
             cur_month = datetime.now().strftime("%Y-%m")
             saved_month = configs.get("current_count_month", "")
             if saved_month and saved_month != cur_month:
@@ -958,31 +1081,36 @@ class SheetsService:
 
     def update_system_config(self, key: str, value: str) -> bool:
         """
-        更新系統全域參數
+        更新系統全域參數並立即刷新快取
         """
         if not self.client or not self.spreadsheet_id:
             return False
         try:
             from datetime import datetime
-            sh = self.client.open_by_key(self.spreadsheet_id)
-            ws = sh.worksheet(self.sheet_name_config)
-            all_values = ws.get_all_values()
-            if not all_values or len(all_values) < 2:
-                return False
-
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             target_key = key.strip()
 
-            for idx, row in enumerate(all_values[1:], start=2):
-                if row and row[0].strip() == target_key:
-                    ws.update_cell(idx, 3, str(value))
-                    ws.update_cell(idx, 5, now_str)
-                    logger.info(f"Updated system config: {target_key} = {value}")
-                    return True
+            def _write():
+                sh = self._open_spreadsheet(self.spreadsheet_id)
+                ws = sh.worksheet(self.sheet_name_config)
+                all_values = ws.get_all_values()
+                if not all_values or len(all_values) < 2:
+                    return False
 
-            # 若無該鍵值則新增
-            ws.append_row([target_key, target_key, str(value), "動態新增參數", now_str])
-            return True
+                for idx, row in enumerate(all_values[1:], start=2):
+                    if row and row[0].strip() == target_key:
+                        ws.update_cell(idx, 3, str(value))
+                        ws.update_cell(idx, 5, now_str)
+                        logger.info(f"Updated system config: {target_key} = {value}")
+                        return True
+
+                ws.append_row([target_key, target_key, str(value), "動態新增參數", now_str], value_input_option="RAW")
+                return True
+
+            ok = self._with_retry(_write)
+            self._invalidate_cache("system_configs")
+            self._stale_cache.pop("system_configs", None)
+            return ok
         except Exception as e:
             logger.error(f"Error updating system config {key}: {e}")
             return False

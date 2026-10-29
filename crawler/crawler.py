@@ -16,6 +16,7 @@ import re
 import time
 import random
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -40,13 +41,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("parkv4_crawler")
 
-# 試算表設定 (方案 B：雙表物理隔離)
-MASTER_SHEET_ID = os.getenv("MASTER_SPREADSHEET_ID", "1oaBHrT8mVfarrVXYJVwqphJEGk0JKWezUHmlRhAMVAQ")
-OPERATIONS_SHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "1BzVMgiG-d7HxeUzbjRooOgvPvWcVH1e_9l1EqWH0HYI")
+# 試算表設定 (方案 B：雙表物理隔離，透過環境變數讀取以符合 ISO27001 規範)
+MASTER_SHEET_ID = os.getenv("MASTER_SPREADSHEET_ID", "")
+OPERATIONS_SHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "")
 
-# Vercel 喚醒端點
+# Vercel 喚醒端點與觸發密鑰 (嚴禁寫死真實密鑰)
 VERCEL_API_URL = os.getenv("VERCEL_NOTIFY_URL", "https://line-tenant-notify.vercel.app/api/v1/trigger")
-TRIGGER_SECRET = os.getenv("NOTIFY_TRIGGER_SECRET", "trg_sec_7a9f82d14e6b910c2834")
+TRIGGER_SECRET = os.getenv("NOTIFY_TRIGGER_SECRET", "")
 
 def get_gspread_client():
     import gspread
@@ -179,10 +180,14 @@ def check_site_status(site: Dict[str, Any], enterprises: Optional[Dict[str, str]
             try:
                 space_json = space_res.json()
                 ret_val = space_json.get("retVal", {}) if isinstance(space_json, dict) else {}
-                car_spaces = ret_val.get("residualCarSpace") or ret_val.get("car_space") or ret_val.get("car")
+                car_spaces = None
+                for k in ("residualCarSpace", "car_space", "car"):
+                    if k in ret_val and ret_val[k] is not None and str(ret_val[k]).strip() != "":
+                        car_spaces = ret_val[k]
+                        break
                 if car_spaces is not None:
                     car_int = int(car_spaces)
-                    is_full_anomaly = car_int <= 3
+                    is_full_anomaly = car_int < 5
                     results.append({
                         "station_name": station_name,
                         "station_ip": raw_ip,
@@ -191,9 +196,9 @@ def check_site_status(site: Dict[str, Any], enterprises: Optional[Dict[str, str]
                         "category": "CAPACITY",
                         "metric_name": "剩餘車位數",
                         "current_value": car_int,
-                        "threshold": 5,
+                        "threshold": "依個人訂閱門檻",
                         "status": "ANOMALY" if is_full_anomaly else "NORMAL",
-                        "details": f"剩餘車位過低 ({car_int} 位)，即將客滿" if is_full_anomaly else "車位充裕",
+                        "details": f"目前可用車位 {car_int} 格",
                         "update_time": now_str
                     })
             except Exception:
@@ -205,65 +210,89 @@ def check_site_status(site: Dict[str, Any], enterprises: Optional[Dict[str, str]
     return results
 
 def run_crawler_pipeline():
-    logger.info("=== Starting Multi-Tenant ParkV4 Inspection Crawler ===")
+    logger.info("=== Starting Multi-Tenant ParkV4 Inspection Crawler (Mode A: Subscribed Only) ===")
     client = get_gspread_client()
     if not client:
         logger.error("No valid Google credentials available. Aborting.")
         return
 
-    # 1. 唯讀讀取車車戰情室主檔
-    logger.info(f"Reading master site list from {MASTER_SHEET_ID}...")
+    if not OPERATIONS_SHEET_ID or not MASTER_SHEET_ID:
+        logger.error("Missing GOOGLE_SPREADSHEET_ID or MASTER_SPREADSHEET_ID in environment variables.")
+        return
+
+    headers = [
+        "station_name", "station_ip", "company_id", "company_name",
+        "category", "metric_name", "current_value", "threshold",
+        "status", "details", "update_time"
+    ]
+
+    # 1. 模式 A：先讀取「個人監控場站表」，僅鎖定實際有人監控的場站
+    ops_sh = client.open_by_key(OPERATIONS_SHEET_ID)
+    ops_ws = ops_sh.worksheet("場站營運數據")
+    sub_ws = ops_sh.worksheet("個人監控場站表")
+    sub_records = sub_ws.get_all_records()
+
+    subscribed_names = {
+        str(r.get("station_name") or "").strip()
+        for r in sub_records
+        if str(r.get("station_name") or "").strip()
+    }
+
+    if not subscribed_names:
+        logger.info("目前個人監控場站表尚無管理員訂閱任何場站，略過本次連線巡檢 (模式 A)。")
+        ops_ws.clear()
+        ops_ws.update(values=[headers], range_name="A1", value_input_option="RAW")
+        return
+
+    # 2. 唯讀讀取車車戰情室主檔比對目標場站連線資訊
+    logger.info("Reading master site list for subscribed stations...")
     master_sh = client.open_by_key(MASTER_SHEET_ID)
     site_ws = master_sh.worksheet("site list")
     enterprise_ws = master_sh.worksheet("企業名單")
 
     sites = site_ws.get_all_records()
-    enterprises = {str(r.get("企業代碼")).strip(): str(r.get("企業名稱")).strip() for r in enterprise_ws.get_all_records()}
+    enterprises = {
+        str(r.get("企業代碼")).strip(): str(r.get("企業名稱")).strip()
+        for r in enterprise_ws.get_all_records()
+    }
 
-    logger.info(f"Loaded {len(sites)} sites across {len(enterprises)} enterprises.")
+    target_sites = []
+    seen_target_names = set()
+    for s in sites:
+        sname = str(s.get("停車場名稱") or s.get("站名") or "").strip()
+        if sname in subscribed_names and sname not in seen_target_names:
+            seen_target_names.add(sname)
+            target_sites.append(s)
 
-    # 2. 執行巡檢 (此處抽樣或全站巡檢)
-    inspected_records = []
-    # 測試示範巡檢前 5 站，並補充一筆異常確保推播運作
-    sample_sites = sites[:5] if len(sites) > 5 else sites
+    logger.info(
+        f"模式 A 精準鎖定 {len(target_sites)} / {len(subscribed_names)} 座已訂閱場站進行並行巡檢: "
+        f"{[s.get('停車場名稱') or s.get('站名') for s in target_sites]}"
+    )
 
-    for s in sample_sites:
-        records = check_site_status(s, enterprises)
-        inspected_records.extend(records)
+    # 3. 多執行緒並行巡檢目標場站 (大幅縮短執行時間，防單站逾時拖慢整體)
+    inspected_records: List[Dict[str, Any]] = []
+    max_workers = min(6, max(1, len(target_sites)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(check_site_status, site, enterprises): site
+            for site in target_sites
+        }
+        for fut in as_completed(future_map):
+            site_info = future_map[fut]
+            try:
+                site_results = fut.result()
+                inspected_records.extend(site_results)
+            except Exception as exc:
+                logger.error(f"Worker exception on site {site_info.get('停車場名稱')}: {exc}")
 
-    # 確保有可用車位示範數據 (若全部實體連線皆離線或未啟用)
-    if not any(r.get("category") == "CAPACITY" for r in inspected_records):
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        inspected_records.append({
-            "station_name": "台中安和站",
-            "station_ip": "116.59.16.119",
-            "company_id": "1",
-            "company_name": "微程式",
-            "category": "CAPACITY",
-            "metric_name": "剩餘車位數",
-            "current_value": 3,
-            "threshold": "依各場站自訂上下限",
-            "status": "NORMAL",
-            "details": "可用車位為 3 格",
-            "update_time": now_str
-        })
-
-    # 3. 寫入營運戰情表
-    logger.info(f"Writing {len(inspected_records)} records to Operations Sheet {OPERATIONS_SHEET_ID}...")
-    ops_sh = client.open_by_key(OPERATIONS_SHEET_ID)
-    ops_ws = ops_sh.worksheet("場站營運數據")
-
-    headers = [
-        "station_name", "station_ip", "company_id", "company_name", 
-        "category", "metric_name", "current_value", "threshold", 
-        "status", "details", "update_time"
-    ]
+    # 4. 寫入營運戰情表
+    logger.info(f"Writing {len(inspected_records)} real inspection records to Operations Sheet...")
     rows = [headers]
     for r in inspected_records:
         rows.append([
             r.get("station_name", ""),
             r.get("station_ip", ""),
-            r.get("company_id", ""),
+            str(r.get("company_id", "")),
             r.get("company_name", ""),
             r.get("category", ""),
             r.get("metric_name", ""),
@@ -275,23 +304,24 @@ def run_crawler_pipeline():
         ])
 
     ops_ws.clear()
-    ops_ws.update(values=rows, range_name="A1")
-    logger.info("Successfully synced latest inspection data into Google Sheets!")
+    ops_ws.update(values=rows, range_name="A1", value_input_option="RAW")
+    logger.info("Successfully synced latest Mode-A inspection data into Google Sheets!")
 
-    # 4. 喚醒模組二 (Vercel)
+    # 5. 喚醒模組二 (Vercel) 執行個人化精準推播
     if VERCEL_API_URL and "your-vercel-domain" not in VERCEL_API_URL:
         logger.info(f"Triggering Module 2 (Vercel) at {VERCEL_API_URL}...")
         try:
+            req_headers = {"X-Trigger-Token": TRIGGER_SECRET} if TRIGGER_SECRET else {}
             resp = requests.post(
                 VERCEL_API_URL,
-                headers={"X-Trigger-Token": TRIGGER_SECRET},
-                timeout=15
+                headers=req_headers,
+                timeout=20
             )
             logger.info(f"Vercel trigger response: {resp.status_code} - {resp.text}")
         except Exception as e:
             logger.error(f"Failed to trigger Vercel: {e}")
 
-    logger.info("=== Inspection Crawler Pipeline Completed ===")
+    logger.info("=== Mode-A Inspection Crawler Pipeline Completed ===")
 
 if __name__ == "__main__":
     run_crawler_pipeline()

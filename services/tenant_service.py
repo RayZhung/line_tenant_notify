@@ -77,19 +77,26 @@ class TenantService:
                 space_cooldown_hours = float(stn_setting.get("space_cooldown", 6) or 6)
                 offline_cooldown_hours = float(stn_setting.get("offline_cooldown", 24) or 24)
 
-                val_raw = row.get("current_value") or row.get("metric_value", 0)
+                val_raw = row.get("current_value")
+                if val_raw is None or str(val_raw).strip() == "":
+                    val_raw = row.get("metric_value", 0)
+                val_upper = str(val_raw).strip().upper()
 
                 is_anomaly = False
                 detected_category = ""
                 anomaly_desc = ""
                 cooldown_hours = 6
 
-                # 1. 斷線判斷 (CONNECTIVITY)
-                if category == "CONNECTIVITY" or status_val in ["OFFLINE", "斷線", "ERROR", "TIMEOUT"]:
+                # 1. 斷線判斷 (CONNECTIVITY)：僅在實際 OFFLINE / ANOMALY 時才判定異常，避免 ONLINE 誤報
+                is_offline_val = val_upper in ["OFFLINE", "斷線", "ERROR", "TIMEOUT"]
+                is_offline_status = status_val in ["OFFLINE", "斷線", "ERROR", "TIMEOUT"] or (
+                    category == "CONNECTIVITY" and status_val == "ANOMALY"
+                )
+                if is_offline_val or is_offline_status:
                     detected_category = "CONNECTIVITY"
                     cooldown_hours = offline_cooldown_hours
                     is_anomaly = True
-                    anomaly_desc = "場站斷線，無法連線回報數據"
+                    anomaly_desc = str(row.get("details") or "場站斷線，無法連線回報數據").strip()
 
                 # 2. 車位判斷 (CAPACITY)
                 elif category == "CAPACITY" or "車位" in metric_name:
@@ -148,16 +155,152 @@ class TenantService:
         return anomalies, newly_triggered
 
     @staticmethod
+    def evaluate_personal_anomalies(
+        operations_data: List[Dict[str, Any]],
+        all_subscriptions: List[Dict[str, Any]],
+        tenant_permissions: List[Dict[str, Any]],
+        cooldown_history: Optional[Dict[Tuple, datetime]] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        個人化精準判定與派發 (模式 A 核心引擎)：
+        直接依據每位管理員在「個人監控場站表」自訂的車位上下限 (space_lower / space_upper)
+        與個人冷卻時數 (space_cooldown / offline_cooldown) 獨立比對最新營運數據。
+        回傳: (user_dispatch_plans, newly_triggered_cooldown_records)
+        """
+        now = datetime.now()
+        cooldowns = cooldown_history or {}
+        user_plans: List[Dict[str, Any]] = []
+        newly_triggered: List[Dict[str, Any]] = []
+
+        # 依場站名稱索引最新營運數據 (同一場站可能有 CONNECTIVITY 與 CAPACITY 兩列)
+        ops_by_station: Dict[str, List[Dict[str, Any]]] = {}
+        for row in operations_data:
+            sname = str(row.get("station_name") or row.get("停車場名稱") or "").strip()
+            if sname:
+                ops_by_station.setdefault(sname, []).append(row)
+
+        user_grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for sub in all_subscriptions:
+            uid = str(sub.get("line_user_id", "")).strip()
+            if uid:
+                user_grouped.setdefault(uid, []).append(sub)
+
+        for uid, subs in user_grouped.items():
+            profile = TenantService.get_user_tenant_profile(uid, tenant_permissions)
+            cname = profile.get("company_name", "微程式") if profile else "微程式"
+            role_name = profile.get("role_name", "管理員") if profile else "管理員"
+
+            user_anomalies: List[Dict[str, Any]] = []
+
+            for sub_cfg in subs:
+                sname = str(sub_cfg.get("station_name", "")).strip()
+                if not sname or sname not in ops_by_station:
+                    continue
+
+                space_lower_raw = str(sub_cfg.get("space_lower", "5")).strip()
+                space_upper_raw = str(sub_cfg.get("space_upper", "無")).strip()
+                space_cd = float(sub_cfg.get("space_cooldown", 6) or 6)
+                offline_cd = float(sub_cfg.get("offline_cooldown", 24) or 24)
+
+                for row in ops_by_station[sname]:
+                    category = str(row.get("category") or "").strip().upper()
+                    metric_name = str(row.get("metric_name") or "").strip()
+                    status_val = str(row.get("status") or "").strip().upper()
+                    station_ip = str(row.get("station_ip") or sub_cfg.get("station_ip") or "-").strip()
+                    update_time = str(row.get("update_time") or "剛剛").strip()
+
+                    if category == "HARDWARE" or "發票" in metric_name:
+                        continue
+
+                    val_raw = row.get("current_value")
+                    if val_raw is None or str(val_raw).strip() == "":
+                        val_raw = row.get("metric_value", 0)
+                    val_upper = str(val_raw).strip().upper()
+
+                    is_anom = False
+                    det_cat = ""
+                    anom_desc = ""
+                    cd_hours = 6.0
+                    thresh_label = ""
+
+                    # (A) 離線斷線判定
+                    is_off_val = val_upper in ["OFFLINE", "斷線", "ERROR", "TIMEOUT"]
+                    is_off_status = status_val in ["OFFLINE", "斷線", "ERROR", "TIMEOUT"] or (
+                        category == "CONNECTIVITY" and status_val == "ANOMALY"
+                    )
+                    if is_off_val or is_off_status:
+                        det_cat = "CONNECTIVITY"
+                        cd_hours = offline_cd
+                        is_anom = True
+                        anom_desc = str(row.get("details") or "場站斷線，無法連線回報數據").strip()
+                        thresh_label = "正常連線"
+
+                    # (B) 個人車位上下限判定
+                    elif category == "CAPACITY" or "車位" in metric_name:
+                        det_cat = "CAPACITY"
+                        cd_hours = space_cd
+                        try:
+                            cur_spaces = float(val_raw)
+                            if space_lower_raw not in ["無", "NONE", "", "-"]:
+                                low_t = float(space_lower_raw)
+                                if cur_spaces < low_t:
+                                    is_anom = True
+                                    anom_desc = f"剩餘車位僅 {int(cur_spaces)} 格 (低於您設定的下限 {int(low_t)} 格)"
+                            if not is_anom and space_upper_raw not in ["無", "NONE", "", "-"]:
+                                up_t = float(space_upper_raw)
+                                if cur_spaces > up_t:
+                                    is_anom = True
+                                    anom_desc = f"剩餘車位達 {int(cur_spaces)} 格 (高於您設定的上限 {int(up_t)} 格)"
+                            thresh_label = f"下限:{space_lower_raw} 上限:{space_upper_raw}"
+                        except (ValueError, TypeError):
+                            pass
+
+                    if not is_anom or not det_cat:
+                        continue
+
+                    # (C) 個人化冷卻檢查 (優先查 (uid, sname, det_cat)，退守查 (sname, det_cat))
+                    last_trig = cooldowns.get((uid, sname, det_cat)) or cooldowns.get((sname, det_cat))
+                    if last_trig:
+                        elapsed = (now - last_trig).total_seconds()
+                        if elapsed < cd_hours * 3600:
+                            continue
+
+                    anom_item = {
+                        "line_user_id": uid,
+                        "station_name": sname,
+                        "station_ip": station_ip,
+                        "company_id": TenantService._extract_company_id(sub_cfg) or TenantService._extract_company_id(row),
+                        "company_name": cname,
+                        "category": det_cat,
+                        "category_label": CATEGORY_MAP.get(det_cat, det_cat),
+                        "metric_name": "場站連線" if det_cat == "CONNECTIVITY" else "可用車位",
+                        "current_value": val_raw,
+                        "threshold": thresh_label,
+                        "details": anom_desc,
+                        "update_time": update_time
+                    }
+                    user_anomalies.append(anom_item)
+                    newly_triggered.append(anom_item)
+
+            if user_anomalies:
+                user_plans.append({
+                    "line_user_id": uid,
+                    "company_name": cname,
+                    "role_name": role_name,
+                    "anomalies": user_anomalies
+                })
+
+        return user_plans, newly_triggered
+
+    @staticmethod
     def map_anomalies_to_users(
         anomalies: List[Dict[str, Any]],
         all_subscriptions: List[Dict[str, Any]],
         tenant_permissions: List[Dict[str, Any]],
-        cooldown_history: Optional[Dict[Tuple[str, str], datetime]] = None
+        cooldown_history: Optional[Dict[Tuple, datetime]] = None
     ) -> List[Dict[str, Any]]:
         """
-        個人化精準派發：
-        依據「個人監控場站表」比對各管理者 (LINE User ID) 自行挑選的 <= 10 座場站，
-        並依據該使用者自訂的車位上下限與冷卻門檻執行派發。
+        向下相容介面：將已篩選之異常清單對應至個人訂閱者
         """
         now = datetime.now()
         cooldowns = cooldown_history or {}
@@ -185,14 +328,12 @@ class TenantService:
                 sub_cfg = user_station_map[sname]
                 cat = item.get("category", "")
 
-                # 依該使用者在個人監控表自訂的冷卻時數判定
                 if cat == "CONNECTIVITY":
                     cd_hours = float(sub_cfg.get("offline_cooldown", 24) or 24)
                 else:
                     cd_hours = float(sub_cfg.get("space_cooldown", 6) or 6)
 
-                history_key = (sname, cat)
-                last_trig = cooldowns.get(history_key)
+                last_trig = cooldowns.get((uid, sname, cat)) or cooldowns.get((sname, cat))
                 if last_trig:
                     elapsed = (now - last_trig).total_seconds()
                     if elapsed < cd_hours * 3600:
@@ -310,6 +451,12 @@ class TenantService:
         """
         raw_cmd = text.strip()
         permissions = sheets_service.fetch_tenant_permissions()
+        perm_err = getattr(sheets_service, "last_error", None)
+        if not permissions and isinstance(perm_err, str) and perm_err:
+            return {
+                "action": "error",
+                "error": "⏳ 雲端試算表連線忙碌中，請稍候 3 秒再試一次（您的企業綁定與監控場站皆安全保留）！"
+            }
         profile = TenantService.get_user_tenant_profile(user_id, permissions)
 
         # ----------------------------------------------------
@@ -365,6 +512,12 @@ class TenantService:
         # (2) 列出可選候選場站 /可選場站
         if norm_cmd in ["/可選場站", "可選場站", "/場站列表", "場站列表", "/候選場站", "有哪些場站可以選", "選場站", "/sites"]:
             candidates = sheets_service.fetch_candidate_sites(company_id, user_id)
+            cand_err = getattr(sheets_service, "last_error", None)
+            if not candidates and isinstance(cand_err, str) and cand_err:
+                return {
+                    "action": "error",
+                    "error": "⏳ 雲端試算表讀取忙碌中，請稍候 3 秒再試一次（您的企業綁定與監控場站皆安全保留）！"
+                }
             current_subs = sheets_service.fetch_user_subscriptions(user_id)
             return {
                 "action": "list_candidates",
@@ -409,6 +562,12 @@ class TenantService:
         # (5) 查詢個人監控場站 /查詢 或 /設定
         if norm_cmd in ["/查詢", "查詢", "/設定", "設定", "/list", "我的場站", "/我的場站"]:
             subs = sheets_service.fetch_user_subscriptions(user_id)
+            sub_err = getattr(sheets_service, "last_error", None)
+            if not subs and isinstance(sub_err, str) and sub_err:
+                return {
+                    "action": "error",
+                    "error": "⏳ 雲端試算表讀取忙碌中，請稍候 3 秒再試一次（您的監控場站設定皆安全保留）！"
+                }
             return {
                 "action": "query",
                 "company_name": company_name,

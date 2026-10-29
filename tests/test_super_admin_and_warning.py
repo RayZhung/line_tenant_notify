@@ -262,9 +262,99 @@ def test_monthly_warning_counter_logic():
     assert just_reached_2 is False
     print(f"  [PASS] 從 195 -> 196: new_count={new_count_2}, just_reached={just_reached_2} (不重複洗版警告)")
 
+def test_mode_a_anomaly_and_anti_false_unbind():
+    print("\n=== 測試 5: 驗證離線精準判定、個人車位上下限與防假性未綁定保護 ===")
+    from datetime import datetime, timedelta
+
+    ops_data = [
+        # 正常連線場站 -> 絕不可誤報為斷線
+        {
+            "station_name": "新莊新知六場",
+            "station_ip": "221.120.1.167",
+            "company_id": "1, 2",
+            "company_name": "微程式 / 大冠",
+            "category": "CONNECTIVITY",
+            "metric_name": "主機連線狀態",
+            "current_value": "ONLINE",
+            "status": "NORMAL",
+            "details": "主機連線正常"
+        },
+        {
+            "station_name": "新莊新知六場",
+            "station_ip": "221.120.1.167",
+            "company_id": "1, 2",
+            "company_name": "微程式 / 大冠",
+            "category": "CAPACITY",
+            "metric_name": "剩餘車位數",
+            "current_value": 10,
+            "status": "NORMAL",
+            "details": "目前可用車位 10 格"
+        },
+        # 實際斷線場站 -> 應觸發 CONNECTIVITY 警報
+        {
+            "station_name": "樹林水源場",
+            "station_ip": "124.218.236.97",
+            "company_id": "1",
+            "company_name": "微程式",
+            "category": "CONNECTIVITY",
+            "metric_name": "主機連線狀態",
+            "current_value": "OFFLINE",
+            "status": "ANOMALY",
+            "details": "連線異常逾時 (ConnectTimeout)"
+        },
+        # 車位為 0 格 (滿場) -> 測試 Python falsy 0 不漏報
+        {
+            "station_name": "樹林俊興場",
+            "station_ip": "221.120.3.203",
+            "company_id": "1",
+            "company_name": "微程式",
+            "category": "CAPACITY",
+            "metric_name": "剩餘車位數",
+            "current_value": 0,
+            "status": "ANOMALY",
+            "details": "目前可用車位 0 格"
+        }
+    ]
+
+    all_subs = [
+        # User A 自訂新莊下限 15 格 (目前 10 格 -> 對 User A 應報警！)、水源斷線 24h、俊興下限 5 格 (0 格 -> 應報警！)
+        {"line_user_id": "U_A", "company_id": "1", "station_name": "新莊新知六場", "space_lower": "15", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+        {"line_user_id": "U_A", "company_id": "1", "station_name": "樹林水源場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+        {"line_user_id": "U_A", "company_id": "1", "station_name": "樹林俊興場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+        # User B 自訂新莊下限 5 格 (目前 10 格 -> 對 User B 正常不報警！)，且水源場 2 小時前剛通知過 (冷卻中不重複發)
+        {"line_user_id": "U_B", "company_id": "1", "station_name": "新莊新知六場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"},
+        {"line_user_id": "U_B", "company_id": "1", "station_name": "樹林水源場", "space_lower": "5", "space_upper": "無", "space_cooldown": "6", "offline_cooldown": "24"}
+    ]
+
+    perms = [
+        {"company_id": "1", "company_name": "微程式", "role_name": "管理員", "authorized_line_user_ids": "U_A,U_B"}
+    ]
+    cooldowns = {
+        ("U_B", "樹林水源場", "CONNECTIVITY"): datetime.now() - timedelta(hours=2)
+    }
+
+    plans, newly = TenantService.evaluate_personal_anomalies(ops_data, all_subs, perms, cooldowns)
+    assert len(plans) == 1 and plans[0]["line_user_id"] == "U_A", f"Unexpected plans: {plans}"
+    ua_anoms = plans[0]["anomalies"]
+    assert len(ua_anoms) == 3, f"Expected 3 anomalies for U_A (新莊CAPACITY, 水源OFFLINE, 俊興0格), got {ua_anoms}"
+    # 確認新莊 ONLINE 沒有產生 CONNECTIVITY 誤報
+    assert not any(a["station_name"] == "新莊新知六場" and a["category"] == "CONNECTIVITY" for a in ua_anoms)
+    print("  [PASS] ONLINE 不誤報斷線、OFFLINE 精準報警、0 格滿場不漏報、個人上下限與獨立冷卻全部驗證通過")
+
+    # 測試 Google Sheets 瞬時 429 限流時，絕不誤跳回 auth_required (請輸入企業授權碼)
+    throttled_sheets = MagicMock()
+    throttled_sheets.fetch_tenant_permissions.return_value = []
+    throttled_sheets.last_error = "APIError: [429]: Quota exceeded for quota metric 'Read requests'"
+
+    res_throttled = TenantService.parse_and_execute_command("U_A", "/查詢", throttled_sheets)
+    assert res_throttled["action"] == "error"
+    assert "安全保留" in res_throttled["error"]
+    print("  [PASS] 試算表瞬時限流/斷線保護生效：回傳忙碌提示，絕不誤跳回『請輸入企業授權碼』")
+
 if __name__ == "__main__":
     test_flex_bubbles()
     test_tenant_service_super_admin_commands()
     test_monthly_warning_counter_logic()
     test_full_candidate_list_and_interactive_actions()
+    test_mode_a_anomaly_and_anti_false_unbind()
     print("\n🎉 全部單元與整合測試 100% 成功通過！")

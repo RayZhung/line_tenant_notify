@@ -348,42 +348,47 @@ async def trigger_anomaly_notification(
             "delivery_breakdown": []
         }
 
-    # 1. 抓取最新營運數據、場站警報設定、最後警報冷卻紀錄
+    # 1. 抓取最新營運數據、個人監控訂閱與冷卻紀錄
     operations_data = sheets_service.fetch_operations_data()
-    alert_settings = sheets_service.fetch_alert_settings()
-    cooldown_history = sheets_service.fetch_cooldown_history()
-
-    # 2. 條件判斷：篩選車位與斷線異常
-    anomalies, newly_triggered = TenantService.filter_anomalies(
-        operations_data=operations_data,
-        alert_settings=alert_settings,
-        cooldown_history=cooldown_history
-    )
-
-    if not anomalies:
-        logger.info("All stations operating within normal threshold or suppressed by cooldown. No alerts needed.")
+    if not operations_data:
         return {
             "status": "success",
-            "message": "All station metrics are normal or suppressed by cooldown.",
-            "total_stations_checked": len(operations_data),
+            "message": "No operations data rows to evaluate.",
+            "total_stations_checked": 0,
             "anomalies_count": 0,
             "alerts_dispatched": 0
         }
 
-    # 3. 個人化派發：比對「個人監控場站表」
     all_subs = sheets_service.fetch_all_user_subscriptions()
+    cooldown_history = sheets_service.fetch_cooldown_history()
     tenant_permissions = sheets_service.fetch_tenant_permissions()
 
     dispatched_count = 0
     delivery_reports = []
+    recorded_triggers: List[Dict[str, Any]] = []
+    total_anomalies_found = 0
 
     if all_subs:
-        user_plans = TenantService.map_anomalies_to_users(
-            anomalies=anomalies,
+        # 模式 A 核心：直接依每位管理員在「個人監控場站表」自訂的上下限與冷卻時數獨立判定
+        user_plans, newly_triggered = TenantService.evaluate_personal_anomalies(
+            operations_data=operations_data,
             all_subscriptions=all_subs,
             tenant_permissions=tenant_permissions,
             cooldown_history=cooldown_history
         )
+        total_anomalies_found = len(newly_triggered)
+
+        if not user_plans:
+            logger.info("All subscribed stations operating within personal thresholds or in cooldown.")
+            return {
+                "status": "success",
+                "message": "All subscribed stations are normal or suppressed by personal cooldown.",
+                "total_stations_checked": len(operations_data),
+                "anomalies_count": 0,
+                "alerts_dispatched": 0
+            }
+
+        dispatched_uids = set()
         for plan in user_plans:
             uid = plan["line_user_id"]
             cname = plan["company_name"]
@@ -393,20 +398,38 @@ async def trigger_anomaly_notification(
             success = line_service.send_role_anomaly_alert(uid, cname, role_name, role_anomalies)
             if success:
                 dispatched_count += 1
+                dispatched_uids.add(uid)
                 delivery_reports.append({
                     "line_user_id": uid,
                     "company_name": cname,
                     "anomalies_count": len(role_anomalies)
                 })
-                # 每成功推播 1 則，累加計數並檢查 195 瀕危門檻
                 new_count, just_reached = sheets_service.increment_monthly_push_count(1)
                 if just_reached:
                     super_uids = sheets_service.fetch_super_admin_user_ids()
                     warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)
                     for s_uid in super_uids:
                         line_service.push_flex(s_uid, warn_bubble, alt_text="🚨 LINE 推播用量瀕危警告 (195/200)")
+
+        recorded_triggers = [t for t in newly_triggered if t.get("line_user_id") in dispatched_uids]
     else:
-        # 備援派發方案
+        # 備援派發方案 (無個人訂閱時依全域警報表與租戶角色分派)
+        alert_settings = sheets_service.fetch_alert_settings()
+        anomalies, newly_triggered = TenantService.filter_anomalies(
+            operations_data=operations_data,
+            alert_settings=alert_settings,
+            cooldown_history=cooldown_history
+        )
+        total_anomalies_found = len(anomalies)
+        if not anomalies:
+            return {
+                "status": "success",
+                "message": "All station metrics are normal or suppressed by cooldown.",
+                "total_stations_checked": len(operations_data),
+                "anomalies_count": 0,
+                "alerts_dispatched": 0
+            }
+
         dispatch_plans = TenantService.map_anomalies_to_roles(anomalies, tenant_permissions)
         for plan in dispatch_plans:
             cname = plan["company_name"]
@@ -423,16 +446,18 @@ async def trigger_anomaly_notification(
                         warn_bubble = line_service.build_emergency_push_warning_flex_bubble(new_count)
                         for s_uid in super_uids:
                             line_service.push_flex(s_uid, warn_bubble, alt_text="🚨 LINE 推播用量瀕危警告 (195/200)")
+        if dispatched_count > 0:
+            recorded_triggers = newly_triggered
 
     # 4. 記錄推播時間到「最後警報紀錄」以實現冷卻週期防洗版
-    if newly_triggered and dispatched_count > 0:
-        sheets_service.record_alert_triggers(newly_triggered)
+    if recorded_triggers and dispatched_count > 0:
+        sheets_service.record_alert_triggers(recorded_triggers)
 
     return {
         "status": "success",
-        "message": f"Evaluated {len(operations_data)} stations. Dispatched {dispatched_count} alerts.",
+        "message": f"Evaluated {len(operations_data)} records. Dispatched {dispatched_count} alerts.",
         "total_stations_checked": len(operations_data),
-        "total_anomalies": len(anomalies),
+        "total_anomalies": total_anomalies_found,
         "total_alerts_dispatched": dispatched_count,
         "delivery_breakdown": delivery_reports
     }
